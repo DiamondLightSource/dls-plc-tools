@@ -3,7 +3,7 @@
 Read-only: every PLC interaction is an explicit-messaging read, the same
 mechanism the EPICS ether_ip driver uses.
 
-Usage: dls-plc-gui [ip-address]
+Usage: dls-read-plc-gui [ip-address]
 """
 
 import argparse
@@ -156,9 +156,13 @@ class PlcWorker(QObject):
             user = self._eip.connected_cip_dispatcher.user_variables
             structs = sorted(n for n, d in user.items() if isinstance(d, CIPStructure))
             workbook = Workbook()
-            workbook.remove(workbook.active)
+            default_sheet = workbook.active
+            if default_sheet is not None:
+                workbook.remove(default_sheet)
             for name in structs:
                 result = self._eip.read_variable(name)
+                if not isinstance(result, CIPStructure):
+                    continue
                 rows = {}
                 width = 1
                 for member, value in result.members.items():
@@ -385,7 +389,8 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(members)
         for col, member in enumerate(members):
             header = self.table.horizontalHeaderItem(col)
-            header.setToolTip(types.get(member, ""))
+            if header is not None:
+                header.setToolTip(types.get(member, ""))
         self.table.setVerticalHeaderLabels([str(i) for i in rows])
 
         previous = self._previous

@@ -2,8 +2,8 @@
 
 Tools for interrogating Omron NX PLCs over EtherNet/IP, supporting EPICS
 commissioning at Diamond Light Source. Two front-ends over the `aphyt`
-library: `interrogate.py` (CLI, entry point `dls-interrogate-plc`) and
-`gui.py` (PySide6, entry point `dls-plc-gui`).
+library: `interrogate.py` (CLI, entry point `dls-read-plc`) and
+`gui.py` (PySide6, entry point `dls-read-plc-gui`).
 
 ## Hard rule: never impact the PLC
 
@@ -68,9 +68,9 @@ already exercised — its sibling classes have inconsistent APIs.
 
 ```bash
 uv sync
-uv run dls-interrogate-plc <ip>     # discover + summarise all structures
-uv run dls-interrogate-plc --help   # -l list, -s show members, -d live watch
-uv run dls-plc-gui <ip>
+uv run dls-read-plc <ip>     # discover + summarise all structures
+uv run dls-read-plc --help   # -l list, -s show members, -d live watch
+uv run dls-read-plc-gui <ip>
 uv run tox -p                       # pre-commit, pyright, pytest
 ```
 

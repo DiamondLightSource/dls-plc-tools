@@ -34,8 +34,8 @@ dev = [
 
 [project.scripts]
 dls-plc-tools = "dls_plc_tools.__main__:main"
-dls-interrogate-plc = "dls_plc_tools.interrogate:main"
-dls-plc-gui = "dls_plc_tools.gui:main"
+dls-read-plc = "dls_plc_tools.interrogate:main"
+dls-read-plc-gui = "dls_plc_tools.gui:main"
 
 [project.urls]
 GitHub = "https://github.com/DiamondLightSource/dls-plc-tools"
@@ -49,7 +49,7 @@ version_file = "src/dls_plc_tools/_version.py"
 
 [tool.pyright]
 typeCheckingMode = "standard"
-reportMissingImports = false # Ignore missing stubs in imported modules
+reportMissingImports = false  # Ignore missing stubs in imported modules
 
 [tool.pytest.ini_options]
 # Run pytest with all our checkers, and don't spam us with massive tracebacks on error
