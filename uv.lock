@@ -12,6 +12,15 @@ wheels = [
 ]
 
 [[package]]
+name = "aphyt"
+version = "0.1.29"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/02/05ea43d6065aa2abc934ac6b5fe7717be8341a8602da800d5cd470243430/aphyt-0.1.29.tar.gz", hash = "sha256:bf7d90541b77c8b0e95828d06370fb29cd4019203cccd2e494d493e4de26683a", size = 45396, upload-time = "2026-05-29T20:53:51.508Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/1d/1768ce31a4026ee83f0c58bf7d0ffe5e87de368e0b4468db1681352cdb98/aphyt-0.1.29-py3-none-any.whl", hash = "sha256:dd585ebbf606d30e4928136f085e923e26ec3959f76994ca479c6ef7c27548a2", size = 49391, upload-time = "2026-05-29T20:53:49.278Z" },
+]
+
+[[package]]
 name = "cachetools"
 version = "7.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -163,6 +172,9 @@ wheels = [
 [[package]]
 name = "dls-plc-tools"
 source = { editable = "." }
+dependencies = [
+    { name = "aphyt" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -177,6 +189,7 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "aphyt" }]
 
 [package.metadata.requires-dev]
 dev = [
