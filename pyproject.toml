@@ -33,6 +33,7 @@ dev = [
 
 [project.scripts]
 dls-plc-tools = "dls_plc_tools.__main__:main"
+dls-interrogate-plc = "dls_plc_tools.interrogate:main"
 
 [project.urls]
 GitHub = "https://github.com/DiamondLightSource/dls-plc-tools"
