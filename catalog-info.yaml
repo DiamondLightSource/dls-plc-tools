@@ -1,0 +1,10 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: dls-plc-tools
+  title: dls-plc-tools
+  description: A collection of tools to facilitate EPICS commissioning of PLC based systems
+spec:
+  type: application
+  lifecycle: experimental
+  owner: 
