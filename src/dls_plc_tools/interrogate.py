@@ -1,7 +1,9 @@
 """
-Summarise the DLS structure tags published by an Omron NX PLC over EtherNet/IP.
+Summarise the structure tags published by an Omron NX PLC over EtherNet/IP.
 
-Usage: python plc_summary.py <ip-address>
+With only an IP address, walks the PLC's tag dictionary and summarises every
+published structure it finds. See --help for tag listing, member detail and
+live value watching.
 """
 
 import argparse
@@ -12,8 +14,7 @@ from aphyt import omron
 from aphyt.cip.cip import CIPException
 from aphyt.cip.cip_datatypes import CIPArray, CIPStructure
 
-# Edit these lists to control what the script looks for.
-STRUCTS = ["Seq", "Temp", "ILK", "Gauge", "PID", "V", "T", "S"]
+# Tags printed as a header for every mode.
 INFO_TAGS = ["PLC_Name", "PLC_Status", "Epics_Num_dev"]
 
 # Structure member whose non-empty entries mark instances actually in use.
@@ -222,16 +223,18 @@ def main():
             watch_struct(eip, args.ip, args.detail, members, interval)
             return
 
-        for name in STRUCTS:
-            try:
-                result = eip.read_variable(name)
-            except CIPException:
-                print(f"\n{name}: not published on this PLC")
-                continue
-            if isinstance(result, CIPStructure):
-                summarise_struct(name, result)
-            else:
-                print(f"\n{name}: {type(result).__name__} = {result}")
+        # Default mode: discover structure tags from the dictionary walk,
+        # then read each one to summarise it.
+        eip.update_variable_dictionary()
+        user_variables = eip.connected_cip_dispatcher.user_variables
+        structs = sorted(
+            name
+            for name, dtype in user_variables.items()
+            if isinstance(dtype, CIPStructure)
+        )
+        print(f"\n{len(structs)} structure tags: {', '.join(structs)}")
+        for name in structs:
+            summarise_struct(name, eip.read_variable(name))
 
 
 if __name__ == "__main__":

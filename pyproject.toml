@@ -13,15 +13,12 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 description = "A collection of tools to facilitate EPICS commissioning of PLC based systems"
-dependencies = ["aphyt"] # Add project dependencies here, e.g. ["click", "numpy"]
+# PySide6<6.10: last series with manylinux_2_28 wheels (RHEL 8 workstations)
+dependencies = ["aphyt", "PySide6<6.10", "openpyxl"]
 dynamic = ["version"]
 license.file = "LICENSE"
 readme = "README.md"
 requires-python = ">=3.11"
-
-[project.optional-dependencies]
-# <6.10: last series with manylinux_2_28 wheels (RHEL 8 workstations)
-gui = ["PySide6<6.10"]
 
 [dependency-groups]
 dev = [
@@ -38,7 +35,7 @@ dev = [
 [project.scripts]
 dls-plc-tools = "dls_plc_tools.__main__:main"
 dls-interrogate-plc = "dls_plc_tools.interrogate:main"
-dls-plc-gui = "dls_plc_tools.gui:main [gui]"
+dls-plc-gui = "dls_plc_tools.gui:main"
 
 [project.urls]
 GitHub = "https://github.com/DiamondLightSource/dls-plc-tools"

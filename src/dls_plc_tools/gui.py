@@ -7,17 +7,20 @@ Usage: dls-plc-gui [ip-address]
 """
 
 import argparse
+import re
 import sys
 
 from aphyt import omron
 from aphyt.cip.cip import CIPException
 from aphyt.cip.cip_datatypes import CIPArray, CIPStructure
+from openpyxl import Workbook
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDoubleSpinBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -37,12 +40,30 @@ from dls_plc_tools.interrogate import INFO_TAGS, USED_MARKER_MEMBER, dims_str
 CHANGED_BRUSH = QBrush(QColor("#ffd54f"))  # amber for values that just changed
 
 
+def _sheet_name(name):
+    """Excel sheet names: max 31 chars, no []:*?/\\ characters."""
+    return re.sub(r"[\[\]:*?/\\]", "_", name)[:31]
+
+
+def _cell(value):
+    """Coerce a CIP value into something openpyxl can store."""
+    return value if isinstance(value, int | float | str | bool) else str(value)
+
+
+def _fit_columns(sheet, pad=2, cap=60):
+    """Size each column to its longest cell (openpyxl has no auto-fit)."""
+    for column in sheet.columns:
+        longest = max(len(str(c.value)) for c in column if c.value is not None)
+        sheet.column_dimensions[column[0].column_letter].width = min(longest + pad, cap)
+
+
 class PlcWorker(QObject):
     """Owns the aphyt connection; lives in a QThread so reads never block the UI."""
 
     connected = Signal(str)
     tags_ready = Signal(list)
     struct_ready = Signal(str, object, object)  # name, {member: values}, {member: type}
+    exported = Signal(str)
     failed = Signal(str)
 
     def __init__(self):
@@ -123,11 +144,46 @@ class PlcWorker(QObject):
         except Exception as e:
             self.failed.emit(f"read {name}: {e}")
 
+    @Slot(str)
+    def export_structs(self, path):
+        """Dump every published structure to an Excel workbook, one sheet per
+        structure: rows are members, columns are instance indices."""
+        if self._eip is None:
+            self.failed.emit("not connected")
+            return
+        try:
+            self._eip.update_variable_dictionary()
+            user = self._eip.connected_cip_dispatcher.user_variables
+            structs = sorted(n for n, d in user.items() if isinstance(d, CIPStructure))
+            workbook = Workbook()
+            workbook.remove(workbook.active)
+            for name in structs:
+                result = self._eip.read_variable(name)
+                rows = {}
+                width = 1
+                for member, value in result.members.items():
+                    if isinstance(value, CIPArray):
+                        rows[member] = value.value()
+                    else:
+                        rows[member] = [value.value()]
+                    width = max(width, len(rows[member]))
+                sheet = workbook.create_sheet(_sheet_name(name))
+                sheet.append([name] + list(range(width)))
+                for member, values in rows.items():
+                    sheet.append([member] + [_cell(v) for v in values])
+                sheet.freeze_panes = "B2"
+                _fit_columns(sheet)
+            workbook.save(path)
+            self.exported.emit(f"exported {len(structs)} structures to {path}")
+        except Exception as e:
+            self.failed.emit(f"export: {e}")
+
 
 class MainWindow(QMainWindow):
     request_connect = Signal(str)
     request_tags = Signal()
     request_struct = Signal(str)
+    request_export = Signal(str)
     request_disconnect = Signal()
 
     def __init__(self, ip=None):
@@ -144,10 +200,12 @@ class MainWindow(QMainWindow):
         self.request_connect.connect(self._worker.connect_plc)
         self.request_tags.connect(self._worker.list_tags)
         self.request_struct.connect(self._worker.read_struct)
+        self.request_export.connect(self._worker.export_structs)
         self.request_disconnect.connect(self._worker.disconnect_plc)
         self._worker.connected.connect(self._on_connected)
         self._worker.tags_ready.connect(self._on_tags)
         self._worker.struct_ready.connect(self._on_struct)
+        self._worker.exported.connect(self._on_exported)
         self._worker.failed.connect(self._on_failed)
         self._thread.start()
 
@@ -168,9 +226,11 @@ class MainWindow(QMainWindow):
 
         # Left: tag browser
         self.scan_btn = QPushButton("Scan tags (slow)")
+        self.export_btn = QPushButton("Export structures (Excel)")
         self.tag_list = QListWidget()
         left_box = QVBoxLayout()
         left_box.addWidget(self.scan_btn)
+        left_box.addWidget(self.export_btn)
         left_box.addWidget(self.tag_list)
         left = QWidget()
         left.setLayout(left_box)
@@ -220,6 +280,7 @@ class MainWindow(QMainWindow):
         self.connect_btn.clicked.connect(self._connect_clicked)
         self.ip_edit.returnPressed.connect(self._connect_clicked)
         self.scan_btn.clicked.connect(self._scan_clicked)
+        self.export_btn.clicked.connect(self._export_clicked)
         self.tag_list.itemDoubleClicked.connect(self._tag_activated)
         self.watch_btn.clicked.connect(self._watch_clicked)
         self.struct_edit.returnPressed.connect(self._watch_clicked)
@@ -241,6 +302,16 @@ class MainWindow(QMainWindow):
     def _tag_activated(self, item):
         self.struct_edit.setText(item.data(Qt.ItemDataRole.UserRole))
         self._watch_clicked()
+
+    def _export_clicked(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export structures", "plc_structs.xlsx", "Excel files (*.xlsx)"
+        )
+        if path:
+            self.statusBar().showMessage(
+                "exporting (scans all tags, then reads every structure)..."
+            )
+            self.request_export.emit(path)
 
     def _watch_clicked(self):
         name = self.struct_edit.text().strip()
@@ -276,6 +347,9 @@ class MainWindow(QMainWindow):
     def _on_connected(self, info):
         self.info_label.setText(info)
         self.statusBar().showMessage("connected", 3000)
+
+    def _on_exported(self, message):
+        self.statusBar().showMessage(message, 10000)
 
     def _on_failed(self, message):
         self._waiting = False

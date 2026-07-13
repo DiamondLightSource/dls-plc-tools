@@ -1,0 +1,95 @@
+# dls-plc-tools
+
+Tools for interrogating Omron NX PLCs over EtherNet/IP, supporting EPICS
+commissioning at Diamond Light Source. Two front-ends over the `aphyt`
+library: `interrogate.py` (CLI, entry point `dls-interrogate-plc`) and
+`gui.py` (PySide6, entry point `dls-plc-gui`).
+
+## Hard rule: never impact the PLC
+
+These tools run against production vacuum PLCs. Everything must be
+**read-only explicit messaging** (the same mechanism the EPICS ether_ip
+driver uses continuously, serviced in the controller's spare time — not the
+task scan). Specifically:
+
+- Never call `write_variable` or anything that changes controller state.
+- Never use aphyt's `start_keep_alive()` — it polls `list_services` every
+  50 ms.
+- Never let a timer queue up requests: one request in flight, skip ticks if
+  the PLC is slow (the GUI's `_waiting` flag does this).
+- Default poll rates ~2 s; floor at 0.5 s.
+
+## aphyt gotchas (each of these has bitten us)
+
+Verify signatures with `inspect` before using an aphyt method you haven't
+already exercised — its sibling classes have inconsistent APIs.
+
+- `omron.NSeries` is the **sync wrapper** used here:
+  `connect_explicit(host, connection_timeout=None)` then
+  `register_session()` — no `retry_time`/`max_attempts`/`connection_status`;
+  those belong to `NSeriesThreadDispatcher`, a different class we don't use.
+  A bad IP raises a socket error after the timeout; no retry loop.
+- The reliable read primitive is a **whole-tag read**: `read_variable("Seq")`.
+  Member-path reads (`read_variable("Seq.Desc")`) take a fragile code path
+  (Omron rejects `get_attribute_all` on sub-paths; string-array members then
+  read element-by-element and fail). Read the whole structure and slice
+  client-side — it is also fewer requests.
+- `read_variable` returns native Python values for scalars but
+  `CIPStructure`/`CIPArray` instances for compound types; call `.value()` on
+  a `CIPArray` to get a list.
+- Unknown structure members raise `KeyError` (client-side resolution), not
+  `CIPException` — catch both.
+- The tag dictionary lives at `connected_cip_dispatcher.user_variables` /
+  `.system_variables` / `.variables`; populated fully by
+  `update_variable_dictionary()` (slow — walks every tag including the
+  `_`-prefixed system ones) and incrementally by each `read_variable`.
+  `variable_list()` is a method returning names only.
+- `NSeries.__enter__` installs a SIGINT handler — fine in the CLI, but do
+  not use the context manager off the main thread (the GUI worker constructs
+  directly and calls `close_explicit()`).
+
+## DLS PLC conventions
+
+- Structures are **structure-of-arrays**: `Seq.Interfc[1]` is instance 1.
+  Members are declared `ARRAY[0..N]`; index 0 is unused padding, so capacity
+  is N instances. Declared capacity ≠ instances in use: a non-empty `Desc`
+  entry marks a real instance (`USED_MARKER_MEMBER` in `interrogate.py`).
+- Tags visible over EtherNet/IP = globals with **Network Publish** set in
+  Sysmac Studio, plus the controller's `_` system variables. Enumeration
+  uses Omron's Tag Name Server object (CIP class 0x6A) — something the EPICS
+  ether_ip driver cannot do (it has no browse service; see its `CN_Services`
+  enum).
+- The reference spreadsheet for structure layouts is
+  `NX PLC EPICS TAGS.xlsx` in the `dlsPLC` EPICS support module.
+- `PLC_Name`, `PLC_Status`, `Epics_Num_dev` are conventionally published
+  info tags (`INFO_TAGS`).
+
+## Development
+
+```bash
+uv sync
+uv run dls-interrogate-plc <ip>     # discover + summarise all structures
+uv run dls-interrogate-plc --help   # -l list, -s show members, -d live watch
+uv run dls-plc-gui <ip>
+uv run tox -p                       # pre-commit, pyright, pytest
+```
+
+- Pre-commit runs ruff with bugbear etc.: `zip()` needs `strict=`, Qt method
+  overrides need `# noqa: N802`.
+- **PySide6 is pinned `<6.10`**: 6.10+ wheels are manylinux_2_34 and DLS
+  RHEL 8 workstations have glibc 2.28. Remove the pin when workstations move
+  to RHEL 9; expect Renovate to propose bumps that must be held back until
+  then. GUI deps are core dependencies, not an extra — uv extras aren't
+  sticky, so a plain `uv sync` would silently uninstall them.
+- No PLC is reachable from CI or dev containers. Test logic with mocked
+  `read_variable` payloads; test the GUI headless with
+  `QT_QPA_PLATFORM=offscreen` (grab-and-assert on the table works well).
+  Anything touching a new aphyt code path needs a check against a real PLC —
+  say so in the PR if that hasn't been done.
+
+## Releases
+
+Pushing a git tag runs the full CI matrix and, on success, publishes to PyPI
+via trusted publishing (GitHub environment `release`) and creates a GitHub
+release. Any tag triggers this — don't push scratch tags. Version comes from
+the tag via setuptools_scm.
