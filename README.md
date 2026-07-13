@@ -5,10 +5,18 @@
 
 # dls_plc_tools
 
-A collection of tools to facilitate EPICS commissioning of PLC based systems
+Tools for interrogating Omron NX PLCs over EtherNet/IP, to support EPICS
+commissioning of PLC-based vacuum systems at Diamond Light Source.
 
-This is where you should write a short paragraph that describes what your module does,
-how it does it, and why people should use it.
+They let you browse the tags a PLC publishes, inspect the layout of its
+structures, and watch values update live — without a Sysmac Studio licence or
+physical access to the controller. Everything is **read-only explicit
+messaging**: the same mechanism the EPICS `ether_ip` driver uses, serviced in
+the controller's spare time, so it is safe to run against production PLCs.
+
+There are two front-ends over the [`aphyt`](https://pypi.org/project/aphyt/)
+library: a command-line tool (`dls-interrogate-plc`) and a PySide6 desktop GUI
+(`dls-plc-gui`).
 
 What            | Where
 :---:           | :---:
@@ -17,18 +25,63 @@ PyPI            | `pip install dls-plc-tools`
 Docker          | `docker run ghcr.io/diamondlightsource/dls-plc-tools:latest`
 Releases        | <https://github.com/DiamondLightSource/dls-plc-tools/releases>
 
-This is where you should put some images or code snippets that illustrate
-some relevant examples. If it is a library then you might put some
-introductory code here:
+## Command-line tool
 
-```python
-from dls_plc_tools import __version__
-
-print(f"Hello dls_plc_tools {__version__}")
-```
-
-Or if it is a commandline tool then you might put some example commands here:
+With just an IP address, `dls-interrogate-plc` discovers every published
+structure tag on the PLC and summarises each one — its member layout and how
+many instances are actually in use:
 
 ```
-python -m dls_plc_tools --version
+dls-interrogate-plc 172.23.x.x
 ```
+
+Other modes:
+
+```
+dls-interrogate-plc 172.23.x.x -l              # list every published tag and its type
+dls-interrogate-plc 172.23.x.x -s Seq          # show one structure's members and array bounds
+dls-interrogate-plc 172.23.x.x -d Seq          # live-updating table of a structure's values
+dls-interrogate-plc 172.23.x.x -d Seq -m Desc,State,Status   # choose which members to watch
+```
+
+`--detail`/`-d` redraws a table every 2 seconds (floor 0.5 s, set with
+`--interval`), highlighting cells that have changed. Press Ctrl-C to stop. See
+`dls-interrogate-plc --help` for the full option list.
+
+## GUI
+
+```
+dls-plc-gui 172.23.x.x
+```
+
+`dls-plc-gui` gives you a browsable list of the PLC's published tags, a live
+table of a selected structure's values (changed cells flash amber), and an
+export of the discovered structure layouts to an Excel spreadsheet. The IP
+address argument is optional — you can also enter it in the window.
+
+## Installation
+
+```
+pip install dls-plc-tools
+```
+
+Or, for development, using [uv](https://docs.astral.sh/uv/):
+
+```
+git clone https://github.com/DiamondLightSource/dls-plc-tools.git
+cd dls-plc-tools
+uv sync
+uv run dls-interrogate-plc <ip>
+```
+
+## Notes
+
+- These tools only ever **read**. They never write to the controller, never
+  start a keep-alive poll, and keep at most one request in flight. Poll rates
+  default to ~2 s and are floored at 0.5 s.
+- Tags are visible over EtherNet/IP only if they are globals with **Network
+  Publish** set in Sysmac Studio, plus the controller's `_`-prefixed system
+  variables. Enumeration uses Omron's Tag Name Server object (CIP class 0x6A).
+- DLS structures are structure-of-arrays: `Seq.Interfc[1]` is instance 1, with
+  index 0 reserved as padding. A non-empty `Desc` entry marks an instance that
+  is actually in use.
