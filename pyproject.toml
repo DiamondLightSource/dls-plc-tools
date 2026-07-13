@@ -13,8 +13,10 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 description = "A collection of tools to facilitate EPICS commissioning of PLC based systems"
-# PySide6<6.10: last series with manylinux_2_28 wheels (RHEL 8 workstations)
-dependencies = ["aphyt", "PySide6<6.10", "openpyxl"]
+# PySide6-Essentials: the GUI only uses QtCore/QtGui/QtWidgets, so we skip the
+# ~270 MB of Addons (QtWebEngine, Qt3D, Charts, ...) the full PySide6 pulls in.
+# <6.10: last series with manylinux_2_28 wheels (RHEL 8 workstations)
+dependencies = ["aphyt", "PySide6-Essentials<6.10", "openpyxl"]
 dynamic = ["version"]
 license.file = "LICENSE"
 readme = "README.md"
