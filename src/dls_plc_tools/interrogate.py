@@ -5,6 +5,7 @@ Usage: python plc_summary.py <ip-address>
 """
 
 import argparse
+import time
 from collections import Counter
 
 from aphyt import omron
@@ -17,6 +18,14 @@ INFO_TAGS = ["PLC_Name", "PLC_Status", "Epics_Num_dev"]
 
 # Structure member whose non-empty entries mark instances actually in use.
 USED_MARKER_MEMBER = "Desc"
+
+# Default columns for --detail; override per-run with --members.
+WATCH_MEMBERS = ["Desc", "State", "Status", "Status_String", "ILK_Status"]
+
+MAX_CELL_WIDTH = 24
+CHANGED = "\x1b[1;33m"  # bold yellow
+RESET = "\x1b[0m"
+CLEAR = "\x1b[H\x1b[2J"
 
 
 def dims_str(member):
@@ -65,6 +74,93 @@ def list_all_tags(eip):
     print(f"\n{len(user_variables)} user tags ({system_count} system tags not shown)")
 
 
+def member_values(struct_instance, member):
+    """Return a member's contents as a list, or None if it is missing."""
+    value = struct_instance.members.get(member)
+    if value is None:
+        return None
+    if isinstance(value, CIPArray):
+        return value.value()
+    return [value.value()]  # scalar member: single-row column
+
+
+def show_struct(eip, struct):
+    """Print every member of a structure with its type and array bounds."""
+    result = eip.read_variable(struct)
+    if not isinstance(result, CIPStructure):
+        print(f"{struct} is a {type(result).__name__}, not a structure")
+        return
+    print(f"\n{struct}: {result.variable_type_name}")
+    for name, member in result.members.items():
+        if isinstance(member, CIPArray):
+            element = type(member.local_cip_data_type_object).__name__
+            print(f"  {name}  ARRAY[{dims_str(member)}] OF {element}")
+        else:
+            print(f"  {name}  {type(member).__name__}")
+
+
+def watch_struct(eip, ip, struct, members, interval):
+    """Poll a structure and redraw a live table of the selected members.
+
+    Reads the whole structure in one request sequence per refresh (read-only
+    explicit messaging, the same mechanism the EPICS ether_ip driver uses),
+    then picks the displayed members out client-side.
+    """
+    rows = None
+    previous = {}
+    while True:
+        result = eip.read_variable(struct)
+        if not isinstance(result, CIPStructure):
+            print(f"{struct} is a {type(result).__name__}, not a structure")
+            return
+        if all(m not in result.members for m in members):
+            print(f"none of [{', '.join(members)}] exist in {struct}")
+            print(f"pick some of its members with -m: {', '.join(result.members)}")
+            return
+        columns = {m: member_values(result, m) for m in members}
+
+        if rows is None:
+            labels = member_values(result, USED_MARKER_MEMBER)
+            if labels:
+                rows = [i for i, v in enumerate(labels) if str(v).strip()]
+            else:  # no marker member: show every index of the first column
+                first = next(v for v in columns.values() if v is not None)
+                rows = list(range(len(first)))
+
+        cells = {}
+        widths = {}
+        for member, values in columns.items():
+            widths[member] = len(member)
+            for idx in rows:
+                if values is None or idx >= len(values):
+                    text = "n/a"
+                else:
+                    text = str(values[idx]).strip()[:MAX_CELL_WIDTH]
+                changed = previous.get((member, idx), text) != text
+                previous[(member, idx)] = text
+                cells[(member, idx)] = (text, changed)
+                widths[member] = max(widths[member], len(text))
+
+        lines = [
+            f"{struct} @ {ip}  {time.strftime('%H:%M:%S')}  "
+            f"(every {interval}s, read-only)  Ctrl-C to stop",
+            "",
+            "  idx  " + "  ".join(m.ljust(widths[m]) for m in members),
+        ]
+        for idx in rows:
+            line = f"  {idx:>3}  "
+            for member in members:
+                text, changed = cells[(member, idx)]
+                padded = text.ljust(widths[member])
+                if changed:
+                    padded = f"{CHANGED}{padded}{RESET}"
+                line += padded + "  "
+            lines.append(line.rstrip())
+
+        print(CLEAR + "\n".join(lines), flush=True)
+        time.sleep(interval)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ip", help="PLC IP address")
@@ -74,6 +170,30 @@ def main():
         action="store_true",
         help="list every published user tag and its type "
         "(slow: walks the whole tag dictionary)",
+    )
+    parser.add_argument(
+        "-d",
+        "--detail",
+        metavar="STRUCT",
+        help="live-updating table of one structure's values, e.g. -d Seq",
+    )
+    parser.add_argument(
+        "-s",
+        "--show",
+        metavar="STRUCT",
+        help="show one structure's members with types and array bounds, e.g. -s PID",
+    )
+    parser.add_argument(
+        "-m",
+        "--members",
+        help="comma-separated members to show with --detail "
+        f"(default: {','.join(WATCH_MEMBERS)})",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="refresh period in seconds for --detail (default: 2.0, min: 0.5)",
     )
     args = parser.parse_args()
 
@@ -87,6 +207,19 @@ def main():
 
         if args.list:
             list_all_tags(eip)
+            return
+
+        if args.show:
+            try:
+                show_struct(eip, args.show)
+            except CIPException:
+                print(f"{args.show}: not published on this PLC")
+            return
+
+        if args.detail:
+            members = args.members.split(",") if args.members else WATCH_MEMBERS
+            interval = max(args.interval, 0.5)
+            watch_struct(eip, args.ip, args.detail, members, interval)
             return
 
         for name in STRUCTS:
