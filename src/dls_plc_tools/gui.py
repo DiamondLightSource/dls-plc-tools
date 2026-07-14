@@ -62,7 +62,8 @@ class PlcWorker(QObject):
 
     connected = Signal(str)
     tags_ready = Signal(list)
-    struct_ready = Signal(str, object, object)  # name, {member: values}, {member: type}
+    # name, {member: values}, {member: type}, array start index (0- or 1-based)
+    struct_ready = Signal(str, object, object, int)
     exported = Signal(str)
     failed = Signal(str)
 
@@ -124,23 +125,26 @@ class PlcWorker(QObject):
             result = self._eip.read_variable(name)
             columns = {}
             types = {}
+            start = 0  # PLC array index of value list position 0 (structs are 1-based)
             if isinstance(result, CIPStructure):
                 for member, value in result.members.items():
                     if isinstance(value, CIPArray):
                         columns[member] = value.value()
+                        start = value.start_array_elements[0]
                         element = type(value.local_cip_data_type_object).__name__
                         types[member] = f"ARRAY[{dims_str(value)}] OF {element}"
                     else:
                         columns[member] = [value.value()]
                         types[member] = type(value).__name__
             elif isinstance(result, CIPArray):
+                start = result.start_array_elements[0]
                 element = type(result.local_cip_data_type_object).__name__
                 columns[name] = result.value()
                 types[name] = f"ARRAY[{dims_str(result)}] OF {element}"
             else:  # scalar tag: one-cell table
                 columns[name] = [result]
                 types[name] = type(result).__name__
-            self.struct_ready.emit(name, columns, types)
+            self.struct_ready.emit(name, columns, types, start)
         except Exception as e:
             self.failed.emit(f"read {name}: {e}")
 
@@ -165,14 +169,18 @@ class PlcWorker(QObject):
                     continue
                 rows = {}
                 width = 1
+                start = (
+                    0  # PLC index of column 0 (structs are declared ARRAY[start..N])
+                )
                 for member, value in result.members.items():
                     if isinstance(value, CIPArray):
                         rows[member] = value.value()
+                        start = value.start_array_elements[0]
                     else:
                         rows[member] = [value.value()]
                     width = max(width, len(rows[member]))
                 sheet = workbook.create_sheet(_sheet_name(name))
-                sheet.append([name] + list(range(width)))
+                sheet.append([name] + list(range(start, start + width)))
                 for member, values in rows.items():
                     sheet.append([member] + [_cell(v) for v in values])
                 sheet.freeze_panes = "B2"
@@ -221,11 +229,14 @@ class MainWindow(QMainWindow):
         self.ip_edit.setPlaceholderText("e.g. 172.23.241.21")
         self.ip_edit.setMaximumWidth(160)
         self.connect_btn = QPushButton("Connect")
+        self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn.setEnabled(False)  # nothing to disconnect until connected
         self.info_label = QLabel("not connected")
         top = QHBoxLayout()
         top.addWidget(QLabel("IP address:"))
         top.addWidget(self.ip_edit)
         top.addWidget(self.connect_btn)
+        top.addWidget(self.disconnect_btn)
         top.addWidget(self.info_label, stretch=1)
 
         # Left: tag browser
@@ -282,6 +293,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self.connect_btn.clicked.connect(self._connect_clicked)
+        self.disconnect_btn.clicked.connect(self._disconnect_clicked)
         self.ip_edit.returnPressed.connect(self._connect_clicked)
         self.scan_btn.clicked.connect(self._scan_clicked)
         self.export_btn.clicked.connect(self._export_clicked)
@@ -298,6 +310,15 @@ class MainWindow(QMainWindow):
         if ip:
             self.info_label.setText(f"connecting to {ip}...")
             self.request_connect.emit(ip)
+
+    def _disconnect_clicked(self):
+        # Stop polling first so no read is queued against the closing session.
+        self._timer.stop()
+        self._waiting = False
+        self.request_disconnect.emit()
+        self.disconnect_btn.setEnabled(False)
+        self.info_label.setText("not connected")
+        self.statusBar().showMessage("disconnected", 3000)
 
     def _scan_clicked(self):
         self.statusBar().showMessage("scanning tags (walks whole dictionary)...")
@@ -350,6 +371,7 @@ class MainWindow(QMainWindow):
 
     def _on_connected(self, info):
         self.info_label.setText(info)
+        self.disconnect_btn.setEnabled(True)
         self.statusBar().showMessage("connected", 3000)
 
     def _on_exported(self, message):
@@ -367,7 +389,7 @@ class MainWindow(QMainWindow):
             self.tag_list.addItem(item)
         self.statusBar().showMessage(f"{len(rows)} user tags", 5000)
 
-    def _on_struct(self, name, columns, types):
+    def _on_struct(self, name, columns, types, start):
         self._waiting = False
         if name != self._current_struct:
             return
@@ -379,29 +401,31 @@ class MainWindow(QMainWindow):
             m for m in columns if not wanted or any(w in m.lower() for w in wanted)
         ]
         labels = columns.get(USED_MARKER_MEMBER)
+        # positions index into the value lists; the displayed index is start+position
+        # (PLC arrays are declared ARRAY[start..N], commonly 1-based).
         if self.used_only.isChecked() and labels:
-            rows = [i for i, v in enumerate(labels) if str(v).strip()]
+            positions = [p for p, v in enumerate(labels) if str(v).strip()]
         else:
-            rows = list(range(max((len(v) for v in columns.values()), default=0)))
+            positions = list(range(max((len(v) for v in columns.values()), default=0)))
 
         self.table.setColumnCount(len(members))
-        self.table.setRowCount(len(rows))
+        self.table.setRowCount(len(positions))
         self.table.setHorizontalHeaderLabels(members)
         for col, member in enumerate(members):
             header = self.table.horizontalHeaderItem(col)
             if header is not None:
                 header.setToolTip(types.get(member, ""))
-        self.table.setVerticalHeaderLabels([str(i) for i in rows])
+        self.table.setVerticalHeaderLabels([str(start + p) for p in positions])
 
         previous = self._previous
         current = {}
         for col, member in enumerate(members):
             values = columns[member]
-            for row, idx in enumerate(rows):
-                text = str(values[idx]).strip() if idx < len(values) else "n/a"
-                current[(member, idx)] = text
+            for row, pos in enumerate(positions):
+                text = str(values[pos]).strip() if pos < len(values) else "n/a"
+                current[(member, pos)] = text
                 item = QTableWidgetItem(text)
-                if previous.get((member, idx), text) != text:
+                if previous.get((member, pos), text) != text:
                     item.setBackground(CHANGED_BRUSH)
                 self.table.setItem(row, col, item)
         self._previous = current

@@ -119,6 +119,16 @@ def watch_struct(eip, ip, struct, members, interval):
             print(f"pick some of its members with -m: {', '.join(result.members)}")
             return
         columns = {m: member_values(result, m) for m in members}
+        # rows index into the value lists; displayed index is row+start, since PLC
+        # arrays are declared ARRAY[start..N] (commonly 1-based, index 0 padding).
+        start = next(
+            (
+                m.start_array_elements[0]
+                for m in result.members.values()
+                if isinstance(m, CIPArray)
+            ),
+            0,
+        )
 
         if rows is None:
             labels = member_values(result, USED_MARKER_MEMBER)
@@ -149,7 +159,7 @@ def watch_struct(eip, ip, struct, members, interval):
             "  idx  " + "  ".join(m.ljust(widths[m]) for m in members),
         ]
         for idx in rows:
-            line = f"  {idx:>3}  "
+            line = f"  {idx + start:>3}  "
             for member in members:
                 text, changed = cells[(member, idx)]
                 padded = text.ljust(widths[member])
