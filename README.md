@@ -59,6 +59,35 @@ table of a selected structure's values (changed cells flash amber), and an
 export of the discovered structure layouts to an Excel spreadsheet. The IP
 address argument is optional — you can also enter it in the window.
 
+### Reaching a PLC on a private network (port forwarding)
+
+Some PLCs sit on a private per-CIA network (`192.168.<cell>.0/24`) reachable only
+from the cluster's worker nodes, not from a normal workstation. Tick **Port
+forward** in the GUI to enable the extra fields and connect via a temporary
+socat forward on the (acastus) cluster:
+
+- **Node** — the worker node with access to that private network, entered in
+  full (e.g. `sr08c-k8s-serv-01.pri.diamond.ac.uk`).
+- **Service IP** — a fixed-pool IP for the forward's LoadBalancer; this is the
+  address the GUI then connects to.
+- **Port** — the port forwarded on both sides, defaulting to the EtherIP port
+  44818.
+
+On **Connect** the tool stands up a throwaway socat pod + LoadBalancer service
+(`service_ip:port` → `plc_ip:port`, pinned to the node) and connects to the
+Service IP; **Disconnect** (and closing the window) tears both down. This path
+needs `kubectl` and the acastus klogin, so it only works on a DLS workstation.
+Leave **Port forward** unticked to connect directly to the IP, as before.
+
+> **Log into acastus first.** The tool has no login of its own — it reuses your
+> shell's cluster credentials. Authenticate in a terminal before launching the
+> GUI (source the acastus klogin and run e.g.
+> `kubectl get pods -n accelerator`), then start the GUI from the same account.
+> If you are not authenticated the forward step just fails with the `kubectl`
+> error in the status bar; and if acastus needs an interactive (browser) login
+> that isn't cached yet, the first attempt may appear to hang until it times
+> out — log in in your terminal and retry.
+
 ## Installation
 
 ```

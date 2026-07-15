@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from dls_plc_tools.interrogate import INFO_TAGS, USED_MARKER_MEMBER, dims_str
+from dls_plc_tools.portforward import EIP_PORT, PortForward
 
 CHANGED_BRUSH = QBrush(QColor("#ffd54f"))  # amber for values that just changed
 
@@ -70,23 +72,45 @@ class PlcWorker(QObject):
     def __init__(self):
         super().__init__()
         self._eip = None
+        self._pfwd = None  # active PortForward, if we connected through one
+
+    def _open_session(self, host, port):
+        """Open a read-only explicit-messaging session to host:port and emit the
+        info-tag header. aphyt hardcodes 44818, so a non-default port is pushed
+        onto the dispatcher before connecting."""
+        eip = omron.NSeries()
+        if port != EIP_PORT:
+            eip.connected_cip_dispatcher.explicit_message_port = port
+        eip.connect_explicit(host, connection_timeout=5.0)
+        eip.register_session()
+        self._eip = eip
+        info = [host]
+        for tag in INFO_TAGS:
+            try:
+                info.append(f"{tag}={eip.read_variable(tag)}")
+            except CIPException:
+                pass
+        self.connected.emit("   ".join(info))
 
     @Slot(str)
     def connect_plc(self, ip):
         try:
             self.disconnect_plc()
-            eip = omron.NSeries()
-            eip.connect_explicit(ip, connection_timeout=5.0)
-            eip.register_session()
-            self._eip = eip
-            info = [ip]
-            for tag in INFO_TAGS:
-                try:
-                    info.append(f"{tag}={eip.read_variable(tag)}")
-                except CIPException:
-                    pass
-            self.connected.emit("   ".join(info))
+            self._open_session(ip, EIP_PORT)
         except Exception as e:
+            self.failed.emit(f"connect: {e}")
+
+    @Slot(str, str, str, int)
+    def connect_plc_forward(self, plc_ip, node, service_ip, port):
+        try:
+            self.disconnect_plc()
+            pfwd = PortForward()
+            pfwd.up(plc_ip, node, service_ip, port)
+            self._pfwd = pfwd
+            self._open_session(service_ip, port)
+        except Exception as e:
+            # Tear down a forward that came up but then failed to connect.
+            self.disconnect_plc()
             self.failed.emit(f"connect: {e}")
 
     @Slot()
@@ -97,6 +121,12 @@ class PlcWorker(QObject):
             except Exception:
                 pass
             self._eip = None
+        if self._pfwd is not None:
+            try:
+                self._pfwd.down()
+            except Exception:
+                pass
+            self._pfwd = None
 
     @Slot()
     def list_tags(self):
@@ -193,6 +223,8 @@ class PlcWorker(QObject):
 
 class MainWindow(QMainWindow):
     request_connect = Signal(str)
+    # (plc_ip, node, service_ip, port)
+    request_connect_forward = Signal(str, str, str, int)
     request_tags = Signal()
     request_struct = Signal(str)
     request_export = Signal(str)
@@ -210,6 +242,7 @@ class MainWindow(QMainWindow):
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self.request_connect.connect(self._worker.connect_plc)
+        self.request_connect_forward.connect(self._worker.connect_plc_forward)
         self.request_tags.connect(self._worker.list_tags)
         self.request_struct.connect(self._worker.read_struct)
         self.request_export.connect(self._worker.export_structs)
@@ -228,6 +261,22 @@ class MainWindow(QMainWindow):
         self.ip_edit = QLineEdit(ip or "")
         self.ip_edit.setPlaceholderText("e.g. 172.23.241.21")
         self.ip_edit.setMaximumWidth(160)
+        # Port forwarding: reach a PLC on a private per-CIA network via a socat
+        # forward on the cluster. Off by default; ticking it enables the fields
+        # below and routes Connect through the forward (see _connect_clicked).
+        self.pfwd_check = QCheckBox("Port forward")
+        self.node_edit = QLineEdit()
+        self.node_edit.setPlaceholderText("node (full name)")
+        self.node_edit.setMaximumWidth(220)
+        self.node_edit.setEnabled(False)
+        self.service_ip_edit = QLineEdit()
+        self.service_ip_edit.setPlaceholderText("service IP (fixed pool)")
+        self.service_ip_edit.setMaximumWidth(160)
+        self.service_ip_edit.setEnabled(False)
+        self.port_spin = QSpinBox()
+        self.port_spin.setRange(1, 65535)
+        self.port_spin.setValue(EIP_PORT)
+        self.port_spin.setEnabled(False)
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
         self.disconnect_btn.setEnabled(False)  # nothing to disconnect until connected
@@ -235,6 +284,13 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.addWidget(QLabel("IP address:"))
         top.addWidget(self.ip_edit)
+        top.addWidget(self.pfwd_check)
+        top.addWidget(QLabel("Node:"))
+        top.addWidget(self.node_edit)
+        top.addWidget(QLabel("Service IP:"))
+        top.addWidget(self.service_ip_edit)
+        top.addWidget(QLabel("Port:"))
+        top.addWidget(self.port_spin)
         top.addWidget(self.connect_btn)
         top.addWidget(self.disconnect_btn)
         top.addWidget(self.info_label, stretch=1)
@@ -292,6 +348,7 @@ class MainWindow(QMainWindow):
         central.setLayout(central_box)
         self.setCentralWidget(central)
 
+        self.pfwd_check.toggled.connect(self._pfwd_toggled)
         self.connect_btn.clicked.connect(self._connect_clicked)
         self.disconnect_btn.clicked.connect(self._disconnect_clicked)
         self.ip_edit.returnPressed.connect(self._connect_clicked)
@@ -305,9 +362,30 @@ class MainWindow(QMainWindow):
 
     # --- user actions -------------------------------------------------
 
+    def _pfwd_toggled(self, checked):
+        # Node/Service IP/Port are only meaningful in port-forward mode.
+        self.node_edit.setEnabled(checked)
+        self.service_ip_edit.setEnabled(checked)
+        self.port_spin.setEnabled(checked)
+
     def _connect_clicked(self):
         ip = self.ip_edit.text().strip()
-        if ip:
+        if not ip:
+            return
+        if self.pfwd_check.isChecked():
+            node = self.node_edit.text().strip()
+            service_ip = self.service_ip_edit.text().strip()
+            port = self.port_spin.value()
+            if not node or not service_ip:
+                self.statusBar().showMessage(
+                    "Node and Service IP required for port forwarding", 5000
+                )
+                return
+            self.info_label.setText(
+                f"port forward {service_ip}:{port} -> {ip} via {node}..."
+            )
+            self.request_connect_forward.emit(ip, node, service_ip, port)
+        else:
             self.info_label.setText(f"connecting to {ip}...")
             self.request_connect.emit(ip)
 

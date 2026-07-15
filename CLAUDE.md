@@ -3,7 +3,33 @@
 Tools for interrogating Omron NX PLCs over EtherNet/IP, supporting EPICS
 commissioning at Diamond Light Source. Two front-ends over the `aphyt`
 library: `interrogate.py` (CLI, entry point `dls-read-plc`) and
-`gui.py` (PySide6, entry point `dls-read-plc-gui`).
+`gui.py` (PySide6, entry point `dls-read-plc-gui`). `portforward.py` backs the
+GUI's optional k8s port-forward path (below).
+
+## Port forwarding (GUI only)
+
+PLCs on a private per-CIA network (`192.168.<cell>.0/24`) are reachable only from
+the cluster's worker nodes. With the GUI's **Port forward** box ticked,
+`portforward.py` stands up a throwaway socat Pod + LoadBalancer Service on the
+(always acastus) cluster — the pod-pfwd shell helper moved into the tool — mapping
+`service_ip:port` → `plc_ip:port` pinned to the given node, then aphyt connects to
+the operator-supplied Service IP (a fixed-pool IP; `loadBalancerIP` must be a
+literal IP, not a DNS name). Node is used verbatim; port defaults to the EtherIP
+port 44818, pushed onto `connected_cip_dispatcher.explicit_message_port` when
+overridden (aphyt's `connect_explicit` takes no port arg). The forward is created
+on Connect and torn down on Disconnect and window close. It needs `kubectl` + the
+acastus klogin, absent from CI/dev containers, so `portforward.py` is tested with
+`subprocess.run` mocked and the whole path is verify-on-a-real-workstation. The
+forward is transport only — the read-only rule below still holds.
+
+Auth is deliberately *not* handled: `_kubectl` runs captured + non-interactive
+and reuses whatever acastus credentials the user's shell already has (like
+pod-pfwd). The operator must be logged into acastus in a terminal before
+launching the GUI. Known rough edge (left as-is, to be characterised on a real
+workstation): if acastus needs an interactive/browser login that isn't cached,
+the first captured `kubectl` call could stall until its 30 s timeout rather than
+prompt. If that turns out to bite, add a preflight auth check with a clear
+"log into acastus first" message.
 
 ## Hard rule: never impact the PLC
 
