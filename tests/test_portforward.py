@@ -202,6 +202,10 @@ def test_down_cleans_up_after_failed_up(monkeypatch):
     deleted = [c for c in fake.calls if c[0] == "delete"]
     assert [c[1] for c in deleted] == ["pod", "service"]
     assert all("pfwd-tester-44818" in c for c in deleted)
+    # the pod must be force-deleted: a stray pod bound to a non-existent node
+    # (the failing case here) sticks in Terminating under a graceful delete
+    pod_delete = next(c for c in deleted if c[1] == "pod")
+    assert "--force" in pod_delete and "--grace-period=0" in pod_delete
 
 
 def test_up_reports_events_when_pod_disappears(monkeypatch):

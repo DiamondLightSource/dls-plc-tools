@@ -281,7 +281,25 @@ class PortForward:
 
     @staticmethod
     def _delete(name):
-        _kubectl(["delete", "pod", name, "-n", NAMESPACE, "--ignore-not-found=true"])
+        # Force-delete the pod (--force --grace-period=0). A graceful delete only
+        # sets a deletionTimestamp and leaves the actual removal to the kubelet on
+        # the pod's node; when the node name is wrong/non-existent (e.g. a short
+        # name instead of the FQDN) no kubelet ever claims the pod, so a graceful
+        # delete blocks in Terminating forever and the pod leaks. --force removes
+        # it from the API server immediately. On a healthy node this only skips
+        # the grace wait — the kubelet still reaps the throwaway socat container.
+        _kubectl(
+            [
+                "delete",
+                "pod",
+                name,
+                "-n",
+                NAMESPACE,
+                "--ignore-not-found=true",
+                "--force",
+                "--grace-period=0",
+            ]
+        )
         _kubectl(
             ["delete", "service", name, "-n", NAMESPACE, "--ignore-not-found=true"]
         )
