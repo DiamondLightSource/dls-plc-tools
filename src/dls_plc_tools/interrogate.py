@@ -6,7 +6,6 @@ published structure it finds. See --help for tag listing, member detail and
 live value watching.
 """
 
-import argparse
 import time
 from collections import Counter
 
@@ -172,65 +171,32 @@ def watch_struct(eip, ip, struct, members, interval):
         time.sleep(interval)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("ip", help="PLC IP address")
-    parser.add_argument(
-        "-l",
-        "--list",
-        action="store_true",
-        help="list every published user tag and its type "
-        "(slow: walks the whole tag dictionary)",
-    )
-    parser.add_argument(
-        "-d",
-        "--detail",
-        metavar="STRUCT",
-        help="live-updating table of one structure's values, e.g. -d Seq",
-    )
-    parser.add_argument(
-        "-s",
-        "--show",
-        metavar="STRUCT",
-        help="show one structure's members with types and array bounds, e.g. -s PID",
-    )
-    parser.add_argument(
-        "-m",
-        "--members",
-        help="comma-separated members to show with --detail "
-        f"(default: {','.join(WATCH_MEMBERS)})",
-    )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=2.0,
-        help="refresh period in seconds for --detail (default: 2.0, min: 0.5)",
-    )
-    args = parser.parse_args()
-
-    with omron.NSeries(args.ip) as eip:
-        print(f"PLC at {args.ip}")
+def read_plc(ip, list_tags=False, detail=None, show=None, members=None, interval=2.0):
+    """Connect to the PLC at ``ip`` and run one interrogation mode — the core of
+    the ``dls-plc-tools read`` subcommand. With no mode selected, summarises every
+    published structure (the dictionary walk)."""
+    with omron.NSeries(ip) as eip:
+        print(f"PLC at {ip}")
         for tag in INFO_TAGS:
             try:
                 print(f"  {tag} = {eip.read_variable(tag)}")
             except CIPException:
                 print(f"  {tag}: not published")
 
-        if args.list:
+        if list_tags:
             list_all_tags(eip)
             return
 
-        if args.show:
+        if show:
             try:
-                show_struct(eip, args.show)
+                show_struct(eip, show)
             except CIPException:
-                print(f"{args.show}: not published on this PLC")
+                print(f"{show}: not published on this PLC")
             return
 
-        if args.detail:
-            members = args.members.split(",") if args.members else WATCH_MEMBERS
-            interval = max(args.interval, 0.5)
-            watch_struct(eip, args.ip, args.detail, members, interval)
+        if detail:
+            watch = members.split(",") if members else WATCH_MEMBERS
+            watch_struct(eip, ip, detail, watch, max(interval, 0.5))
             return
 
         # Default mode: discover structure tags from the dictionary walk,
@@ -245,7 +211,3 @@ def main():
         print(f"\n{len(structs)} structure tags: {', '.join(structs)}")
         for name in structs:
             summarise_struct(name, eip.read_variable(name))
-
-
-if __name__ == "__main__":
-    main()

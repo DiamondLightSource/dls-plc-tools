@@ -2,9 +2,12 @@
 
 Tools for interrogating Omron NX PLCs over EtherNet/IP, supporting EPICS
 commissioning at Diamond Light Source. Two front-ends over the `aphyt`
-library: `interrogate.py` (CLI, entry point `dls-read-plc`) and
-`gui.py` (PySide6, entry point `dls-read-plc-gui`). `portforward.py` backs the
-GUI's optional k8s port-forward path (below).
+library, exposed as subcommands of the single `dls-plc-tools` entry point (a
+Typer app in `__main__.py`): `interrogate.py` (CLI, `dls-plc-tools read`, core
+`read_plc()`) and `gui.py` (PySide6, `dls-plc-tools gui`, core `run_gui()`). The
+entry point matches the package name so it runs with `uvx dls-plc-tools …`; the
+subcommands lazy-import their heavy deps (aphyt / PySide6) so `--version`/`--help`
+stay fast. `portforward.py` backs the GUI's optional k8s port-forward path (below).
 
 ## Port forwarding (GUI only)
 
@@ -20,7 +23,7 @@ aphyt's connect all need the literal IP — a name would be rejected by k8s.
 Node is used verbatim (its full name, e.g.
 `sr19c-k8s-serv-01.pri.diamond.ac.uk`). In the GUI both **Node** and **Service
 IP** are editable combos prefilled `sr01c`…`sr24c`; every top-bar field, plus the
-Port-forward checkbox, can be prefilled from the CLI (`dls-read-plc-gui <ip>
+Port-forward checkbox, can be prefilled from the CLI (`dls-plc-tools gui <ip>
 -f/--port-forward --node … --service-ip … --port … --cluster …`). Ticking the
 Port-forward box fires `request_nodes`, whose worker slot runs
 `portforward.list_nodes()` (`kubectl get nodes -o name`, `node/` prefix stripped)
@@ -72,7 +75,7 @@ connected into a not-yet-routable IP, aphyt hit its connect timeout, and the
 `except` in `connect_plc_forward` tore the whole forward straight back down —
 which looked like "the pod never comes up" (it did; it was deleted milliseconds
 later). Because failure tears the forward down, debug by pointing the CLI at a
-hand-applied forward (`dls-read-plc <service_ip>`) rather than through the GUI.
+hand-applied forward (`dls-plc-tools read <service_ip>`) rather than through the GUI.
 
 The Service IP is normally already owned by a *permanent* per-node forward
 (e.g. `common-services/services/sr19c-pfwd`, whose Helm chart exposes terminal
@@ -183,9 +186,9 @@ already exercised — its sibling classes have inconsistent APIs.
 
 ```bash
 uv sync
-uv run dls-read-plc <ip>     # discover + summarise all structures
-uv run dls-read-plc --help   # -l list, -s show members, -d live watch
-uv run dls-read-plc-gui <ip>
+uv run dls-plc-tools read <ip>     # discover + summarise all structures
+uv run dls-plc-tools read --help   # -l list, -s show members, -d live watch
+uv run dls-plc-tools gui <ip>
 uv run tox -p                       # pre-commit, pyright, pytest
 ```
 

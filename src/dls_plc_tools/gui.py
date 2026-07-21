@@ -3,10 +3,9 @@
 Read-only: every PLC interaction is an explicit-messaging read, the same
 mechanism the EPICS ether_ip driver uses.
 
-Usage: dls-read-plc-gui [ip-address]
+Usage: dls-plc-tools gui [ip-address]
 """
 
-import argparse
 import re
 import sys
 
@@ -673,9 +672,12 @@ class MainWindow(QMainWindow):
         # out the pod's termination grace) outlast a short wait(), so the process
         # would exit mid-teardown and leak the pod/service. Blocking here holds
         # the close until deletion actually completes.
-        QMetaObject.invokeMethod(
+        # PySide6's invokeMethod stub types the slot name as bytes, but at
+        # runtime it requires str (bytes raises ValueError) — a bad stub, so
+        # ignore the resulting false positives.
+        QMetaObject.invokeMethod(  # pyright: ignore[reportCallIssue]
             self._worker,
-            "disconnect_plc",
+            "disconnect_plc",  # pyright: ignore[reportArgumentType]
             Qt.ConnectionType.BlockingQueuedConnection,
         )
         self._thread.quit()
@@ -683,51 +685,24 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Qt GUI for browsing Omron NX PLC tags over EtherNet/IP"
-    )
-    parser.add_argument("ip", nargs="?", help="PLC IP address to pre-fill")
-    parser.add_argument(
-        "-f",
-        "--port-forward",
-        action="store_true",
-        help="tick the Port forward box and enable the fields below",
-    )
-    parser.add_argument(
-        "--node",
-        help="k8s node to pin the socat forward to "
-        "(e.g. sr19c-k8s-serv-01.pri.diamond.ac.uk)",
-    )
-    parser.add_argument(
-        "--service-ip",
-        help="fixed-pool Service IP, or a DNS name to resolve (e.g. sr19c-pfwd)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=EIP_PORT,
-        help=f"forward / EtherNet-IP port (default: {EIP_PORT})",
-    )
-    parser.add_argument(
-        "--cluster",
-        default=DEFAULT_CLUSTER,
-        help="k8s cluster for the port forward — selects the klogin to source "
-        f"(default: {DEFAULT_CLUSTER}); only acastus has the forward set up",
-    )
-    args = parser.parse_args()
+def run_gui(
+    ip=None,
+    port_forward=False,
+    node=None,
+    service_ip=None,
+    port=None,
+    cluster=DEFAULT_CLUSTER,
+):
+    """Launch the Qt GUI with the given fields pre-filled — the core of the
+    ``dls-plc-tools gui`` subcommand."""
     app = QApplication(sys.argv)
     window = MainWindow(
-        ip=args.ip,
-        port_forward=args.port_forward,
-        node=args.node,
-        service_ip=args.service_ip,
-        port=args.port,
-        cluster=args.cluster,
+        ip=ip,
+        port_forward=port_forward,
+        node=node,
+        service_ip=service_ip,
+        port=port,
+        cluster=cluster,
     )
     window.show()
     sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()
