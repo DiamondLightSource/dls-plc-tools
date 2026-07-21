@@ -57,21 +57,38 @@ acastus klogin, absent from CI/dev containers, so `portforward.py` is tested wit
 `subprocess.run` mocked and the whole path is verify-on-a-real-workstation. The
 forward is transport only — the read-only rule below still holds.
 
-Auth is deliberately *not* handled: `_kubectl` runs captured + non-interactive
-and reuses whatever acastus credentials the user's shell already has (like
-pod-pfwd). One sharp edge that cost a long debugging session: klogin prints a
-**welcome banner to stdout** whenever it (re)authenticates, so `_kubectl`
-redirects klogin's own stdout to `/dev/null` (`source "$KLOGIN" >/dev/null &&
-exec kubectl …`) — otherwise the banner contaminates captured kubectl output and
-breaks exact parses like `_wait_ready`'s `"True"` check, *intermittently* (only
-when the banner appears, i.e. when creds aren't already warm).
+Auth login is deliberately *not* performed by the tool: `_kubectl` runs captured
++ non-interactive and reuses whatever acastus credentials the user's shell
+already has (like pod-pfwd). One sharp edge that cost a long debugging session:
+klogin prints a **welcome banner to stdout** whenever it (re)authenticates, so
+`_kubectl` redirects klogin's own stdout to `/dev/null` (`source "$KLOGIN"
+>/dev/null && exec kubectl …`) — otherwise the banner contaminates captured
+kubectl output and breaks exact parses like `_wait_ready`'s `"True"` check,
+*intermittently* (only when the banner appears, i.e. when creds aren't already
+warm).
 
-The operator must be logged into acastus in a terminal before
-launching the GUI. Known rough edge (left as-is, to be characterised on a real
-workstation): if acastus needs an interactive/browser login that isn't cached,
-the first captured `kubectl` call could stall until its 30 s timeout rather than
-prompt. If that turns out to bite, add a preflight auth check with a clear
-"log into acastus first" message.
+The klogin kubeconfig authenticates through a **kubelogin exec plugin**
+(`oidc-login get-token`, `--grant-type=password`, `interactiveMode: IfAvailable`,
+token cache under `~/.kube/cache/acastus/oidc-login`). When the cached token has
+expired the plugin can only refresh by prompting for a fedid/password on a TTY.
+The tool never prompts, so two guards handle the logged-out case cleanly instead
+of stalling:
+
+- `_kubectl` forces stdin non-interactive (`DEVNULL` when nothing is piped in),
+  so an expired token makes the plugin fail *fast* rather than block on a prompt
+  until the timeout; and it wraps `subprocess.TimeoutExpired` as a
+  `PortForwardError` so any residual stall is still a clean message, not a raw
+  traceback.
+- `up()` runs a `check_auth()` preflight (`kubectl auth whoami`, exit 0 iff
+  authenticated) **before** creating anything, and on failure raises a
+  `PortForwardError` telling the operator to log into acastus in a terminal
+  (running `klogout` first if they see auth errors) and retry.
+
+So the operator must still be logged into acastus in a terminal before
+connecting; the change is that a stale/absent login now surfaces as an
+actionable status-bar message up front instead of a silent hang. To exercise the
+logged-out path on a real workstation, run **`klogout`** (on `PATH` after sourcing
+klogin) and reconnect.
 
 ## Hard rule: never impact the PLC
 

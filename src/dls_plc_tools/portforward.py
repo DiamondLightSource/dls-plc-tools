@@ -89,14 +89,53 @@ def _kubectl(args, stdin=None, timeout=30):
         "bash",
         *args,
     ]
-    result = subprocess.run(
-        cmd, input=stdin, capture_output=True, text=True, timeout=timeout
-    )
+    # klogin's kubeconfig authenticates via a kubelogin exec plugin with
+    # grant-type=password and interactiveMode=IfAvailable: with an expired token
+    # and a TTY on stdin it would block on a fedid/password prompt until `timeout`
+    # fires. We never prompt (see check_auth), so force stdin non-interactive —
+    # DEVNULL when there's nothing to pipe in — so the plugin fails fast instead
+    # of hanging. Calls that pipe a manifest (input=stdin) are already a pipe, not
+    # a TTY, so they're non-interactive too.
+    run_kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+    if stdin is None:
+        run_kwargs["stdin"] = subprocess.DEVNULL
+    else:
+        run_kwargs["input"] = stdin
+    try:
+        result = subprocess.run(cmd, **run_kwargs)
+    except subprocess.TimeoutExpired as e:
+        raise PortForwardError(
+            f"kubectl {' '.join(args)} timed out after {timeout:g}s "
+            "(is acastus reachable and are you logged in?)"
+        ) from e
     if result.returncode != 0:
         raise PortForwardError(
             f"kubectl {' '.join(args)} failed: {result.stderr.strip()}"
         )
     return result.stdout
+
+
+def check_auth(timeout=10):
+    """Verify the shell's acastus credentials are usable, raising
+    ``PortForwardError`` with an actionable message if not.
+
+    klogin's kubeconfig authenticates via kubelogin's OIDC *password* grant
+    (an exec credential plugin). When the cached token has expired the plugin
+    can only re-authenticate by prompting for a fedid/password on a TTY — which
+    this tool deliberately never provides (``_kubectl`` runs non-interactive).
+    So probe once, up front, with a cheap read-only ``kubectl auth whoami``: it
+    exits 0 for any authenticated user and non-zero otherwise. On failure, tell
+    the operator to log in in a terminal rather than standing up a forward whose
+    every kubectl call would fail the same way.
+    """
+    try:
+        _kubectl(["auth", "whoami"], timeout=timeout)
+    except PortForwardError as e:
+        raise PortForwardError(
+            "not logged into acastus (or the session has expired). In a terminal, "
+            "source the acastus klogin and log in — run `klogout` first if you see "
+            f"authentication errors — then retry.\n  ({e})"
+        ) from None
 
 
 def _manifest(name, node, plc_ip, service_ip, port):
@@ -183,6 +222,10 @@ class PortForward:
             if progress is not None:
                 progress(msg)
 
+        # Fail fast with a clear "log into acastus" message before creating
+        # anything, rather than letting each kubectl call fail cryptically.
+        report("checking acastus login...")
+        check_auth()
         name = name_for(port)
         # Record the name before applying so down() can clean up even if the
         # apply or the readiness/reachability waits below raise. _delete is

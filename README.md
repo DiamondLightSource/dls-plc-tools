@@ -104,12 +104,12 @@ annotation.
 
 > **Log into acastus first.** The tool has no login of its own — it reuses your
 > shell's cluster credentials. Authenticate in a terminal before launching the
-> GUI (source the acastus klogin and run e.g.
-> `kubectl get pods -n accelerator`), then start the GUI from the same account.
-> If you are not authenticated the forward step just fails with the `kubectl`
-> error in the status bar; and if acastus needs an interactive (browser) login
-> that isn't cached yet, the first attempt may appear to hang until it times
-> out — log in in your terminal and retry.
+> GUI (source the acastus klogin and log in, e.g. `kubectl get pods -n
+> accelerator`), then start the GUI from the same account. If your login is
+> missing or expired, the forward step fails fast with a clear
+> **"not logged into acastus … log in in a terminal, then retry"** message in the
+> status bar (a preflight `kubectl auth whoami` check), rather than hanging. If
+> you hit persistent auth errors, run `klogout` and log in again.
 
 ## Installation
 

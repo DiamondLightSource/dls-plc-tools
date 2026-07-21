@@ -36,11 +36,15 @@ class FakeRun:
         self.applied: dict = {}
         self._get_stdout = get_stdout
 
-    def __call__(self, cmd, input=None, capture_output=True, text=True, timeout=30):
+    def __call__(
+        self, cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30
+    ):
         # cmd is ["bash", "-c", script, "bash", *kubectl_args]
         args = cmd[4:]
         self.calls.append(args)
         verb = args[0]
+        if verb == "auth":
+            return _ok()  # `auth whoami` preflight: authenticated
         if verb == "apply":
             assert input is not None
             self.applied = json.loads(input)
@@ -210,7 +214,7 @@ def test_down_cleans_up_after_failed_up(monkeypatch):
 
 def test_up_reports_events_when_pod_disappears(monkeypatch):
     # get pod -> NotFound (evicted), but get events still returns the reason.
-    def run(cmd, input=None, capture_output=True, text=True, timeout=30):
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
         args = cmd[4:]
         if args[:2] == ["get", "pod"]:
             return SimpleNamespace(returncode=1, stdout="", stderr='pods "x" not found')
@@ -232,7 +236,7 @@ def test_kubectl_silences_klogin_banner(monkeypatch):
     # parses (e.g. _wait_ready's "True" check) break when it appears.
     scripts = []
 
-    def run(cmd, input=None, capture_output=True, text=True, timeout=30):
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
         scripts.append(cmd[2])  # the bash -c script
         return _ok("True")
 
@@ -245,7 +249,9 @@ def test_kubectl_silences_klogin_banner(monkeypatch):
 
 
 def test_kubectl_failure_raises_with_stderr(monkeypatch):
-    def failing(cmd, input=None, capture_output=True, text=True, timeout=30):
+    def failing(
+        cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30
+    ):
         return SimpleNamespace(returncode=1, stdout="", stderr="boom: forbidden")
 
     monkeypatch.setattr(portforward.subprocess, "run", failing)
@@ -278,3 +284,60 @@ def test_down_without_up_is_noop(monkeypatch):
 
     PortForward().down()
     assert fake.calls == []
+
+
+def test_up_aborts_when_not_logged_in(monkeypatch):
+    # The preflight `auth whoami` fails -> up() must abort with a login message
+    # and never create the pod/service.
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        args = cmd[4:]
+        if args[:2] == ["auth", "whoami"]:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="error: You must be logged in to the server (Unauthorized)",
+            )
+        raise AssertionError(f"should not run {args} when not logged in")
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+
+    with pytest.raises(PortForwardError, match="not logged into acastus"):
+        PortForward().up("192.168.8.10", "node", "172.23.206.158", 44818)
+
+
+def test_check_auth_passes_when_logged_in(monkeypatch):
+    calls = []
+
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        calls.append(cmd[4:])
+        return _ok("Username  jjc62351")
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+    portforward.check_auth()  # must not raise
+    assert calls == [["auth", "whoami"]]
+
+
+def test_kubectl_timeout_is_wrapped(monkeypatch):
+    # A stalled kubectl (e.g. kubelogin blocking on a password prompt) must
+    # surface as a clean PortForwardError, not a raw TimeoutExpired.
+    def stall(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        raise portforward.subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(portforward.subprocess, "run", stall)
+    with pytest.raises(PortForwardError, match="timed out"):
+        portforward._kubectl(["get", "pod", "x"])
+
+
+def test_kubectl_forces_noninteractive_stdin(monkeypatch):
+    # With no piped input, stdin must be DEVNULL so kubelogin can't block on an
+    # interactive fedid/password prompt.
+    seen = {}
+
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        seen["input"], seen["stdin"] = input, stdin
+        return _ok("ok")
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+    portforward._kubectl(["get", "pod", "x"])
+    assert seen["input"] is None
+    assert seen["stdin"] == portforward.subprocess.DEVNULL
