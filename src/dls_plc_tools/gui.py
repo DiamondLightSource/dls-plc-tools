@@ -14,11 +14,12 @@ from aphyt import omron
 from aphyt.cip.cip import CIPException
 from aphyt.cip.cip_datatypes import CIPArray, CIPStructure
 from openpyxl import Workbook
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from dls_plc_tools.interrogate import INFO_TAGS, USED_MARKER_MEMBER, dims_str
-from dls_plc_tools.portforward import EIP_PORT, PortForward
+from dls_plc_tools.portforward import EIP_PORT, PortForward, resolve_host
 
 CHANGED_BRUSH = QBrush(QColor("#ffd54f"))  # amber for values that just changed
 
@@ -59,6 +60,22 @@ def _fit_columns(sheet, pad=2, cap=60):
         sheet.column_dimensions[column[0].column_letter].width = min(longest + pad, cap)
 
 
+def _cell_combo(placeholder, items, width):
+    """An editable combo prefilled with per-cell choices. Editable so a value
+    not in the list (another cell, an explicit IP, a one-off node) can be typed
+    over the selection; starts blank rather than preselecting sr01c."""
+    combo = QComboBox()
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    combo.addItems(items)
+    combo.setMaximumWidth(width)
+    combo.setCurrentIndex(-1)
+    line = combo.lineEdit()
+    if line is not None:
+        line.setPlaceholderText(placeholder)
+    return combo
+
+
 class PlcWorker(QObject):
     """Owns the aphyt connection; lives in a QThread so reads never block the UI."""
 
@@ -68,6 +85,7 @@ class PlcWorker(QObject):
     struct_ready = Signal(str, object, object, int)
     exported = Signal(str)
     failed = Signal(str)
+    progress = Signal(str)  # human-readable phase updates during a slow connect
 
     def __init__(self):
         super().__init__()
@@ -104,9 +122,15 @@ class PlcWorker(QObject):
     def connect_plc_forward(self, plc_ip, node, service_ip, port):
         try:
             self.disconnect_plc()
+            # The Service IP field accepts a literal IP or a DNS name (e.g.
+            # sr19c-pfwd); resolve to the literal IP loadBalancerIP/MetalLB and
+            # aphyt all need.
+            self.progress.emit(f"resolving {service_ip}...")
+            service_ip = resolve_host(service_ip)
             pfwd = PortForward()
-            pfwd.up(plc_ip, node, service_ip, port)
+            pfwd.up(plc_ip, node, service_ip, port, progress=self.progress.emit)
             self._pfwd = pfwd
+            self.progress.emit(f"forward up; connecting to {service_ip}:{port}...")
             self._open_session(service_ip, port)
         except Exception as e:
             # Tear down a forward that came up but then failed to connect.
@@ -122,10 +146,14 @@ class PlcWorker(QObject):
                 pass
             self._eip = None
         if self._pfwd is not None:
+            self.progress.emit("removing port forward...")
             try:
                 self._pfwd.down()
-            except Exception:
-                pass
+            except Exception as e:
+                # Surface a failed teardown rather than silently leaking the pod.
+                self.failed.emit(f"teardown: {e}")
+            else:
+                self.progress.emit("port forward removed")
             self._pfwd = None
 
     @Slot()
@@ -251,6 +279,7 @@ class MainWindow(QMainWindow):
         self._worker.tags_ready.connect(self._on_tags)
         self._worker.struct_ready.connect(self._on_struct)
         self._worker.exported.connect(self._on_exported)
+        self._worker.progress.connect(self._on_progress)
         self._worker.failed.connect(self._on_failed)
         self._thread.start()
 
@@ -258,25 +287,39 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._poll)
 
         # Top bar: connection
-        self.ip_edit = QLineEdit(ip or "")
+        # TEMP (sr19c testing convenience): prefill the sr19c forward so Connect
+        # works with no typing. Revert these defaults before merging.
+        self.ip_edit = QLineEdit(ip or "192.168.19.10")
         self.ip_edit.setPlaceholderText("e.g. 172.23.241.21")
         self.ip_edit.setMaximumWidth(160)
         # Port forwarding: reach a PLC on a private per-CIA network via a socat
         # forward on the cluster. Off by default; ticking it enables the fields
         # below and routes Connect through the forward (see _connect_clicked).
         self.pfwd_check = QCheckBox("Port forward")
-        self.node_edit = QLineEdit()
-        self.node_edit.setPlaceholderText("node (full name)")
-        self.node_edit.setMaximumWidth(220)
-        self.node_edit.setEnabled(False)
-        self.service_ip_edit = QLineEdit()
-        self.service_ip_edit.setPlaceholderText("service IP (fixed pool)")
-        self.service_ip_edit.setMaximumWidth(160)
-        self.service_ip_edit.setEnabled(False)
+        self.pfwd_check.setChecked(True)  # TEMP: testing default
+        # sr01c..sr24c pickers for the two per-cell fields. Both combos are
+        # editable so a value not in the list (another cell, an explicit IP, a
+        # one-off node) can be typed over the selection.
+        self.node_edit = _cell_combo(
+            "node (full name)",
+            [f"sr{n:02d}c-k8s-serv-01.pri.diamond.ac.uk" for n in range(1, 25)],
+            width=260,
+        )
+        self.node_edit.setEnabled(True)  # TEMP: enabled because pfwd is prechecked
+        self.node_edit.setCurrentText(  # TEMP: testing default
+            "sr19c-k8s-serv-01.pri.diamond.ac.uk"
+        )
+        self.service_ip_edit = _cell_combo(
+            "service IP or DNS name",
+            [f"sr{n:02d}c-pfwd" for n in range(1, 25)],
+            width=180,
+        )
+        self.service_ip_edit.setEnabled(True)  # TEMP
+        self.service_ip_edit.setCurrentText("sr19c-pfwd")  # TEMP: testing default
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(EIP_PORT)
-        self.port_spin.setEnabled(False)
+        self.port_spin.setEnabled(True)  # TEMP
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
         self.disconnect_btn.setEnabled(False)  # nothing to disconnect until connected
@@ -373,8 +416,8 @@ class MainWindow(QMainWindow):
         if not ip:
             return
         if self.pfwd_check.isChecked():
-            node = self.node_edit.text().strip()
-            service_ip = self.service_ip_edit.text().strip()
+            node = self.node_edit.currentText().strip()
+            service_ip = self.service_ip_edit.currentText().strip()
             port = self.port_spin.value()
             if not node or not service_ip:
                 self.statusBar().showMessage(
@@ -455,8 +498,17 @@ class MainWindow(QMainWindow):
     def _on_exported(self, message):
         self.statusBar().showMessage(message, 10000)
 
+    def _on_progress(self, message):
+        # Phase updates while a forward stands up (can take several seconds).
+        self.info_label.setText(message)
+        self.statusBar().showMessage(message)
+
     def _on_failed(self, message):
         self._waiting = False
+        # A failure while not connected is a connect failure: keep it visible in
+        # the top label instead of letting the next action's status overwrite it.
+        if not self.disconnect_btn.isEnabled():
+            self.info_label.setText(message)
         self.statusBar().showMessage(message)
 
     def _on_tags(self, rows):
@@ -513,9 +565,18 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 - Qt override
         self._timer.stop()
-        self.request_disconnect.emit()
+        # Tear the forward down *synchronously* before quitting the thread. A
+        # queued emit races thread shutdown, and the kubectl deletes (which wait
+        # out the pod's termination grace) outlast a short wait(), so the process
+        # would exit mid-teardown and leak the pod/service. Blocking here holds
+        # the close until deletion actually completes.
+        QMetaObject.invokeMethod(
+            self._worker,
+            "disconnect_plc",
+            Qt.ConnectionType.BlockingQueuedConnection,
+        )
         self._thread.quit()
-        self._thread.wait(3000)
+        self._thread.wait(5000)
         super().closeEvent(event)
 
 
