@@ -127,9 +127,11 @@ class PlcWorker(QObject):
             # aphyt all need.
             self.progress.emit(f"resolving {service_ip}...")
             service_ip = resolve_host(service_ip)
-            pfwd = PortForward()
-            pfwd.up(plc_ip, node, service_ip, port, progress=self.progress.emit)
-            self._pfwd = pfwd
+            # Register the forward *before* standing it up: up() creates the
+            # pod/service and can then raise (e.g. pod never Ready), and the
+            # except below only tears down what's in self._pfwd.
+            self._pfwd = PortForward()
+            self._pfwd.up(plc_ip, node, service_ip, port, progress=self.progress.emit)
             self.progress.emit(f"forward up; connecting to {service_ip}:{port}...")
             self._open_session(service_ip, port)
         except Exception as e:

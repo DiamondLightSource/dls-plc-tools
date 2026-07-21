@@ -184,11 +184,14 @@ class PortForward:
                 progress(msg)
 
         name = name_for(port)
+        # Record the name before applying so down() can clean up even if the
+        # apply or the readiness/reachability waits below raise. _delete is
+        # idempotent (--ignore-not-found), so this is safe if nothing got created.
+        self._name = name
         report(f"creating forward pod {name} on {node}...")
         self._delete(name)  # replace a stale forward rather than clash with it
         manifest = _manifest(name, node, plc_ip, service_ip, port)
         _kubectl(["apply", "-f", "-"], stdin=json.dumps(manifest))
-        self._name = name
         report("waiting for socat pod to be ready...")
         self._wait_ready(name)
         # The pod being Ready isn't enough: aphyt connects to service_ip:port, and

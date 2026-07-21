@@ -185,6 +185,25 @@ def test_up_raises_when_pod_never_ready(monkeypatch):
         PortForward().up("192.168.8.10", "node", "172.23.206.158", 44818)
 
 
+def test_down_cleans_up_after_failed_up(monkeypatch):
+    # up() creates the pod/service then times out waiting for Ready; down() must
+    # still delete them (name recorded before the apply), or the forward leaks.
+    fake = FakeRun(get_stdout="False")  # pod never becomes Ready
+    monkeypatch.setattr(portforward.subprocess, "run", fake)
+    monkeypatch.setattr(portforward, "READY_TIMEOUT", 0.0)  # fail fast
+    monkeypatch.setattr(portforward.time, "sleep", lambda _s: None)
+
+    pf = PortForward()
+    with pytest.raises(PortForwardError):
+        pf.up("192.168.8.10", "badnode", "172.23.206.158", 44818)
+
+    fake.calls.clear()
+    pf.down()
+    deleted = [c for c in fake.calls if c[0] == "delete"]
+    assert [c[1] for c in deleted] == ["pod", "service"]
+    assert all("pfwd-tester-44818" in c for c in deleted)
+
+
 def test_up_reports_events_when_pod_disappears(monkeypatch):
     # get pod -> NotFound (evicted), but get events still returns the reason.
     def run(cmd, input=None, capture_output=True, text=True, timeout=30):
