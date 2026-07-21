@@ -13,16 +13,26 @@ the cluster's worker nodes. With the GUI's **Port forward** box ticked,
 `portforward.py` stands up a throwaway socat Pod + LoadBalancer Service on the
 (always acastus) cluster — the pod-pfwd shell helper moved into the tool — mapping
 `service_ip:port` → `plc_ip:port` pinned to the given node, then aphyt connects to
-the operator-supplied Service IP (a fixed-pool IP; `loadBalancerIP` must be a
-literal IP, not a DNS name). Node is used verbatim (its full name, e.g.
-`sr19c-k8s-serv-01.pri.diamond.ac.uk`). The forward nodes are tainted
+the resolved Service IP. The **Service IP** field accepts a literal IP *or* a DNS
+name (e.g. `sr19c-pfwd`); `resolve_host` (`socket.gethostbyname`) resolves it to a
+literal IP up front, because `loadBalancerIP`, the MetalLB sharing key, and
+aphyt's connect all need the literal IP — a name would be rejected by k8s.
+Node is used verbatim (its full name, e.g.
+`sr19c-k8s-serv-01.pri.diamond.ac.uk`). In the GUI both **Node** and **Service
+IP** are editable combos prefilled `sr01c`…`sr24c`; every top-bar field, plus the
+Port-forward checkbox, can be prefilled from the CLI (`dls-read-plc-gui <ip>
+-f/--port-forward --node … --service-ip … --port …`). The forward nodes are tainted
 `location=<cell>` (observed `NoSchedule`, which `nodeName` already bypasses, so
 the pod runs regardless); the pod still tolerates any `location` taint
 (`operator: Exists`) as cheap insurance and to match the permanent forward's
 pods, in case a node is ever `NoExecute`-tainted. Port defaults to the EtherIP
 port 44818, pushed onto `connected_cip_dispatcher.explicit_message_port` when
 overridden (aphyt's `connect_explicit` takes no port arg). The forward is created
-on Connect and torn down on Disconnect and window close.
+on Connect and torn down on Disconnect and window close. `closeEvent` tears down
+**synchronously** (`QMetaObject.invokeMethod(..., BlockingQueuedConnection)`): a
+queued teardown loses the race with thread shutdown — the `kubectl delete`s
+outlast the `wait()` (they sit through the pod's termination grace) and the
+process exits mid-delete, leaking the pod/service.
 
 `up()` waits for the socat pod to be Ready *and then* for `service_ip:port` to
 actually accept a TCP connection (`_wait_reachable`) before returning. The pod
@@ -54,7 +64,9 @@ pod-pfwd). One sharp edge that cost a long debugging session: klogin prints a
 redirects klogin's own stdout to `/dev/null` (`source "$KLOGIN" >/dev/null &&
 exec kubectl …`) — otherwise the banner contaminates captured kubectl output and
 breaks exact parses like `_wait_ready`'s `"True"` check, *intermittently* (only
-when the banner appears, i.e. when creds aren't already warm). The operator must be logged into acastus in a terminal before
+when the banner appears, i.e. when creds aren't already warm).
+
+The operator must be logged into acastus in a terminal before
 launching the GUI. Known rough edge (left as-is, to be characterised on a real
 workstation): if acastus needs an interactive/browser login that isn't cached,
 the first captured `kubectl` call could stall until its 30 s timeout rather than

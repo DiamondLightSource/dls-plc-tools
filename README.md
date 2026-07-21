@@ -66,9 +66,12 @@ from the cluster's worker nodes, not from a normal workstation. Tick **Port
 forward** in the GUI to enable the extra fields and connect via a temporary
 socat forward on the (acastus) cluster:
 
-- **Node** — the worker node with access to that private network, entered in
-  full (e.g. `sr08c-k8s-serv-01.pri.diamond.ac.uk`).
-- **Service IP** — a fixed-pool IP for the forward's LoadBalancer; this is the
+- **Node** — the worker node with access to that private network. The dropdown
+  is prefilled with `sr01c`…`sr24c` (`srNNc-k8s-serv-01.pri.diamond.ac.uk`); it
+  is editable, so type over it for any other node.
+- **Service IP** — a fixed-pool IP for the forward's LoadBalancer, or a DNS name
+  that resolves to one (the dropdown offers `sr01c-pfwd`…`sr24c-pfwd`, also
+  editable). A name is resolved to its IP before use; that resolved IP is the
   address the GUI then connects to.
 - **Port** — the port forwarded on both sides, defaulting to the EtherIP port
   44818.
@@ -78,6 +81,26 @@ On **Connect** the tool stands up a throwaway socat pod + LoadBalancer service
 Service IP; **Disconnect** (and closing the window) tears both down. This path
 needs `kubectl` and the acastus klogin, so it only works on a DLS workstation.
 Leave **Port forward** unticked to connect directly to the IP, as before.
+
+Every field can be prefilled from the command line, which also ticks the box —
+handy for a specific cell. This opens the GUI ready to connect to the sr19c PLC
+through its forward:
+
+```
+dls-read-plc-gui 192.168.19.10 --port-forward \
+  --node sr19c-k8s-serv-01.pri.diamond.ac.uk --service-ip sr19c-pfwd
+```
+
+`--service-ip` takes an IP or a DNS name, `--port` overrides 44818, and `-f` is
+short for `--port-forward`. See `dls-read-plc-gui --help` for all options.
+
+The Service IP is normally already owned by a permanent per-node forward that
+exposes other services on the same fixed IP (e.g. the `sr19c-pfwd` Helm release
+under `common-services/`). Sharing one LoadBalancer IP between that service and
+this tool's needs MetalLB's `metallb.universe.tf/allow-shared-ip` annotation set
+to the same key on both — the chart and the tool both key it on the IP itself, so
+they match automatically, as long as the permanent service carries the
+annotation.
 
 > **Log into acastus first.** The tool has no login of its own — it reuses your
 > shell's cluster credentials. Authenticate in a terminal before launching the

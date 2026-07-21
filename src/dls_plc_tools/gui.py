@@ -258,7 +258,9 @@ class MainWindow(QMainWindow):
     request_export = Signal(str)
     request_disconnect = Signal()
 
-    def __init__(self, ip=None):
+    def __init__(
+        self, ip=None, port_forward=False, node=None, service_ip=None, port=None
+    ):
         super().__init__()
         self.setWindowTitle("DLS PLC tools")
         self.resize(1100, 650)
@@ -286,17 +288,15 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
 
-        # Top bar: connection
-        # TEMP (sr19c testing convenience): prefill the sr19c forward so Connect
-        # works with no typing. Revert these defaults before merging.
-        self.ip_edit = QLineEdit(ip or "192.168.19.10")
+        # Top bar: connection. Fields prefill from the command line (see main).
+        self.ip_edit = QLineEdit(ip or "")
         self.ip_edit.setPlaceholderText("e.g. 172.23.241.21")
         self.ip_edit.setMaximumWidth(160)
         # Port forwarding: reach a PLC on a private per-CIA network via a socat
         # forward on the cluster. Off by default; ticking it enables the fields
         # below and routes Connect through the forward (see _connect_clicked).
         self.pfwd_check = QCheckBox("Port forward")
-        self.pfwd_check.setChecked(True)  # TEMP: testing default
+        self.pfwd_check.setChecked(port_forward)
         # sr01c..sr24c pickers for the two per-cell fields. Both combos are
         # editable so a value not in the list (another cell, an explicit IP, a
         # one-off node) can be typed over the selection.
@@ -305,21 +305,18 @@ class MainWindow(QMainWindow):
             [f"sr{n:02d}c-k8s-serv-01.pri.diamond.ac.uk" for n in range(1, 25)],
             width=260,
         )
-        self.node_edit.setEnabled(True)  # TEMP: enabled because pfwd is prechecked
-        self.node_edit.setCurrentText(  # TEMP: testing default
-            "sr19c-k8s-serv-01.pri.diamond.ac.uk"
-        )
+        if node:
+            self.node_edit.setCurrentText(node)
         self.service_ip_edit = _cell_combo(
             "service IP or DNS name",
             [f"sr{n:02d}c-pfwd" for n in range(1, 25)],
             width=180,
         )
-        self.service_ip_edit.setEnabled(True)  # TEMP
-        self.service_ip_edit.setCurrentText("sr19c-pfwd")  # TEMP: testing default
+        if service_ip:
+            self.service_ip_edit.setCurrentText(service_ip)
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
-        self.port_spin.setValue(EIP_PORT)
-        self.port_spin.setEnabled(True)  # TEMP
+        self.port_spin.setValue(port or EIP_PORT)
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
         self.disconnect_btn.setEnabled(False)  # nothing to disconnect until connected
@@ -402,6 +399,10 @@ class MainWindow(QMainWindow):
         self.struct_edit.returnPressed.connect(self._watch_clicked)
         self.interval.valueChanged.connect(self._interval_changed)
         self.live.toggled.connect(self._live_toggled)
+
+        # Sync the forward fields' enabled state with the (possibly CLI-set)
+        # checkbox; setChecked before wiring doesn't emit toggled.
+        self._pfwd_toggled(self.pfwd_check.isChecked())
 
     # --- user actions -------------------------------------------------
 
@@ -585,9 +586,36 @@ def main():
         description="Qt GUI for browsing Omron NX PLC tags over EtherNet/IP"
     )
     parser.add_argument("ip", nargs="?", help="PLC IP address to pre-fill")
+    parser.add_argument(
+        "-f",
+        "--port-forward",
+        action="store_true",
+        help="tick the Port forward box and enable the fields below",
+    )
+    parser.add_argument(
+        "--node",
+        help="k8s node to pin the socat forward to "
+        "(e.g. sr19c-k8s-serv-01.pri.diamond.ac.uk)",
+    )
+    parser.add_argument(
+        "--service-ip",
+        help="fixed-pool Service IP, or a DNS name to resolve (e.g. sr19c-pfwd)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=EIP_PORT,
+        help=f"forward / EtherNet-IP port (default: {EIP_PORT})",
+    )
     args = parser.parse_args()
     app = QApplication(sys.argv)
-    window = MainWindow(args.ip)
+    window = MainWindow(
+        ip=args.ip,
+        port_forward=args.port_forward,
+        node=args.node,
+        service_ip=args.service_ip,
+        port=args.port,
+    )
     window.show()
     sys.exit(app.exec())
 
