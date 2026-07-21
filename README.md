@@ -15,8 +15,9 @@ messaging**: the same mechanism the EPICS `ether_ip` driver uses, serviced in
 the controller's spare time, so it is safe to run against production PLCs.
 
 There are two front-ends over the [`aphyt`](https://pypi.org/project/aphyt/)
-library: a command-line tool (`dls-read-plc`) and a PySide6 desktop GUI
-(`dls-read-plc-gui`).
+library: a command-line tool (`dls-plc-tools read`) and a PySide6 desktop GUI
+(`dls-plc-tools gui`) — both subcommands of the single `dls-plc-tools` command,
+so you can run either without installing, e.g. `uvx dls-plc-tools gui 172.23.x.x`.
 
 What            | Where
 :---:           | :---:
@@ -27,34 +28,34 @@ Releases        | <https://github.com/DiamondLightSource/dls-plc-tools/releases>
 
 ## Command-line tool
 
-With just an IP address, `dls-read-plc` discovers every published
+With just an IP address, `dls-plc-tools read` discovers every published
 structure tag on the PLC and summarises each one — its member layout and how
 many instances are actually in use:
 
 ```
-dls-read-plc 172.23.x.x
+dls-plc-tools read 172.23.x.x
 ```
 
 Other modes:
 
 ```
-dls-read-plc 172.23.x.x -l              # list every published tag and its type
-dls-read-plc 172.23.x.x -s Seq          # show one structure's members and array bounds
-dls-read-plc 172.23.x.x -d Seq          # live-updating table of a structure's values
-dls-read-plc 172.23.x.x -d Seq -m Desc,State,Status   # choose which members to watch
+dls-plc-tools read 172.23.x.x -l              # list every published tag and its type
+dls-plc-tools read 172.23.x.x -s Seq          # show one structure's members and array bounds
+dls-plc-tools read 172.23.x.x -d Seq          # live-updating table of a structure's values
+dls-plc-tools read 172.23.x.x -d Seq -m Desc,State,Status   # choose which members to watch
 ```
 
 `--detail`/`-d` redraws a table every 2 seconds (floor 0.5 s, set with
 `--interval`), highlighting cells that have changed. Press Ctrl-C to stop. See
-`dls-read-plc --help` for the full option list.
+`dls-plc-tools read --help` for the full option list.
 
 ## GUI
 
 ```
-dls-read-plc-gui 172.23.x.x
+dls-plc-tools gui 172.23.x.x
 ```
 
-`dls-read-plc-gui` gives you a browsable list of the PLC's published tags, a live
+`dls-plc-tools gui` gives you a browsable list of the PLC's published tags, a live
 table of a selected structure's values (changed cells flash amber), and an
 export of the discovered structure layouts to an Excel spreadsheet. The IP
 address argument is optional — you can also enter it in the window.
@@ -94,13 +95,13 @@ handy for a specific cell. This opens the GUI ready to connect to the sr19c PLC
 through its forward:
 
 ```
-dls-read-plc-gui 192.168.19.10 --port-forward \
+dls-plc-tools gui 192.168.19.10 --port-forward \
   --node sr19c-k8s-serv-01.pri.diamond.ac.uk --service-ip sr19c-pfwd
 ```
 
 `--service-ip` takes an IP or a DNS name, `--port` overrides 44818, `-f` is
 short for `--port-forward`, and `--cluster` (default `acastus`) selects which
-cluster's klogin to source. See `dls-read-plc-gui --help` for all options.
+cluster's klogin to source. See `dls-plc-tools gui --help` for all options.
 
 The Service IP is normally already owned by a permanent per-node forward that
 exposes other services on the same fixed IP (e.g. the `sr19c-pfwd` Helm release
@@ -131,7 +132,7 @@ Or, for development, using [uv](https://docs.astral.sh/uv/):
 git clone https://github.com/DiamondLightSource/dls-plc-tools.git
 cd dls-plc-tools
 uv sync
-uv run dls-read-plc <ip>
+uv run dls-plc-tools read <ip>
 ```
 
 ## Notes
