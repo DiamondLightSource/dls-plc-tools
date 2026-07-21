@@ -21,7 +21,27 @@ Node is used verbatim (its full name, e.g.
 `sr19c-k8s-serv-01.pri.diamond.ac.uk`). In the GUI both **Node** and **Service
 IP** are editable combos prefilled `sr01c`…`sr24c`; every top-bar field, plus the
 Port-forward checkbox, can be prefilled from the CLI (`dls-read-plc-gui <ip>
--f/--port-forward --node … --service-ip … --port …`). The forward nodes are tainted
+-f/--port-forward --node … --service-ip … --port … --cluster …`). Ticking the
+Port-forward box fires `request_nodes`, whose worker slot runs
+`portforward.list_nodes()` (`kubectl get nodes -o name`, `node/` prefix stripped)
+and repopulates the Node combo with the cluster's *live* node names — so the list
+tracks the cluster with no code change, and a picked name is a guaranteed-valid
+`nodeName` (avoiding the short-name-vs-FQDN mistake that strands a pod). It needs
+a login, so it's fetched lazily on tick, not at startup; on failure the static
+`sr01c`…`sr24c` fallback stays and the error shows in the status bar. The combo
+stays editable, and a typed/prefilled `--node` is preserved across the refresh
+(`setCurrentText`). `--cluster` (default `acastus`) selects which klogin to source
+(`{KLOGIN_DIR}/{cluster}`) and is threaded through `PortForward`/`_kubectl`/
+`check_auth`/`list_nodes`; only acastus actually has the shared-IP forward model,
+so the arg makes the plumbing generic but not the feature. The **cluster is shown
+in the GUI** in the Port-forward checkbox label (`Port forward (acastus)`) and the
+connect status line. A **pod-status LED** (`Pod:` in the top bar) is driven by the
+worker's `forward_status(state, name)` signal — `pending` (orange) emitted before
+`up()`, `good` (green) after the session opens, `inactive` (red) from
+`disconnect_plc` (which the failure path also routes through, so a failed
+stand-up goes red). It shows the pod/service name (`name_for(port)` =
+`pfwd-<user>-<port>`) while active so the pod is traceable, cleared on inactive.
+The forward nodes are tainted
 `location=<cell>` (observed `NoSchedule`, which `nodeName` already bypasses, so
 the pod runs regardless); the pod still tolerates any `location` taint
 (`operator: Exists`) as cheap insurance and to match the permanent forward's
@@ -33,6 +53,16 @@ on Connect and torn down on Disconnect and window close. `closeEvent` tears down
 queued teardown loses the race with thread shutdown — the `kubectl delete`s
 outlast the `wait()` (they sit through the pod's termination grace) and the
 process exits mid-delete, leaking the pod/service.
+
+Before creating anything, `up()` also runs `_check_free`: it lists Services in
+the namespace and refuses to start if a *different* one already claims
+`service_ip:port` (someone else forwarding the same node/PLC), so two users don't
+collide or clobber each other. It skips our own same-named stale forward (which
+`up()` replaces) and filters on the port, so the permanent per-cell forward that
+legitimately shares the IP on the terminal-server ports (8026-8028) isn't flagged.
+It checks declared Service ownership rather than TCP-probing, to avoid racing
+MetalLB/kube-proxy routing lag. `list_nodes` likewise runs `check_auth` first so a
+logged-out node refresh gives the friendly "log in" message, not a raw error.
 
 `up()` waits for the socat pod to be Ready *and then* for `service_ip:port` to
 actually accept a TCP connection (`_wait_reachable`) before returning. The pod

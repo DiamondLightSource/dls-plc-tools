@@ -17,11 +17,15 @@ import socket
 import subprocess
 import time
 
-# Cluster is always acastus; these mirror pod-pfwd.
+# These mirror pod-pfwd.
 NAMESPACE = "accelerator"
 IMAGE = "alpine/socat:1.7.4.4-r0"
 EIP_PORT = 44818  # EtherNet/IP explicit-messaging port (aphyt's default)
-KLOGIN = "/dls_sw/kubernetes/klogin/1.0/acastus"
+# Per-cluster klogin scripts live under this directory (e.g. .../klogin/1.0/acastus).
+# The cluster name selects which one to source; acastus is the only cluster set up
+# with the MetalLB shared-IP forward model this tool relies on, so it's the default.
+KLOGIN_DIR = "/dls_sw/kubernetes/klogin/1.0"
+DEFAULT_CLUSTER = "acastus"
 
 # MetalLB lets several LoadBalancer services share one IP only if each carries
 # this annotation set to the same key and their ports don't overlap. The
@@ -68,12 +72,14 @@ def name_for(port):
     return f"pfwd-{getpass.getuser()}-{port}".lower()
 
 
-def _kubectl(args, stdin=None, timeout=30):
-    """Run one kubectl command with acastus credentials and return its stdout.
+def _kubectl(args, stdin=None, timeout=30, cluster=DEFAULT_CLUSTER):
+    """Run one kubectl command against ``cluster`` and return its stdout.
 
-    Sources the klogin script (which sets up cluster auth in the shell env) and
-    execs kubectl with ``args`` passed as positional parameters, so no user
-    input is interpolated into the shell command.
+    Sources that cluster's klogin script (which sets up cluster auth in the shell
+    env) and execs kubectl with ``args`` passed as positional parameters, so no
+    user input is interpolated into the shell command. ``cluster`` only selects
+    the klogin path — it is a fixed set of on-disk script names, never user text
+    in the shell.
 
     klogin prints a welcome banner to stdout whenever it (re)authenticates. We
     redirect *its* stdout to /dev/null so that banner can't contaminate the
@@ -82,10 +88,11 @@ def _kubectl(args, stdin=None, timeout=30):
     appear). ``exec kubectl`` inherits the shell's original stdout, so kubectl's
     own output is unaffected; klogin's stderr is kept so auth errors still show.
     """
+    klogin = f"{KLOGIN_DIR}/{cluster}"
     cmd = [
         "bash",
         "-c",
-        f'source "{KLOGIN}" >/dev/null && exec kubectl "$@"',
+        f'source "{klogin}" >/dev/null && exec kubectl "$@"',
         "bash",
         *args,
     ]
@@ -115,8 +122,26 @@ def _kubectl(args, stdin=None, timeout=30):
     return result.stdout
 
 
-def check_auth(timeout=10):
-    """Verify the shell's acastus credentials are usable, raising
+def list_nodes(cluster=DEFAULT_CLUSTER):
+    """Return the cluster's node names, in the exact form a Pod's ``nodeName``
+    accepts.
+
+    ``kubectl get nodes -o name`` yields ``node/<name>`` lines; we strip the
+    ``node/`` prefix. Because the names come straight from the API they are
+    guaranteed-valid ``nodeName`` values — picking one avoids the short-name vs
+    FQDN mistake that strands a pod on a non-existent node. Requires a login to
+    ``cluster``, so callers fetch this lazily rather than at startup; the
+    ``check_auth`` preflight turns a logged-out state into the same actionable
+    "log in in a terminal" message the connect path gives, rather than a raw
+    kubectl error.
+    """
+    check_auth(cluster=cluster)
+    out = _kubectl(["get", "nodes", "-o", "name"], cluster=cluster)
+    return [line.split("/", 1)[-1] for line in out.split()]
+
+
+def check_auth(timeout=10, cluster=DEFAULT_CLUSTER):
+    """Verify the shell's credentials for ``cluster`` are usable, raising
     ``PortForwardError`` with an actionable message if not.
 
     klogin's kubeconfig authenticates via kubelogin's OIDC *password* grant
@@ -129,11 +154,11 @@ def check_auth(timeout=10):
     every kubectl call would fail the same way.
     """
     try:
-        _kubectl(["auth", "whoami"], timeout=timeout)
+        _kubectl(["auth", "whoami"], timeout=timeout, cluster=cluster)
     except PortForwardError as e:
         raise PortForwardError(
-            "not logged into acastus (or the session has expired). In a terminal, "
-            "source the acastus klogin and log in — run `klogout` first if you see "
+            f"not logged into {cluster} (or the session has expired). In a terminal, "
+            f"source the {cluster} klogin and log in — run `klogout` first if you see "
             f"authentication errors — then retry.\n  ({e})"
         ) from None
 
@@ -206,8 +231,9 @@ class PortForward:
     """A single socat pod + service forward. Remembers its name so teardown is
     exact and idempotent."""
 
-    def __init__(self):
+    def __init__(self, cluster=DEFAULT_CLUSTER):
         self._name = None
+        self._cluster = cluster
 
     def up(self, plc_ip, node, service_ip, port=EIP_PORT, progress=None):
         """Create the forward ``service_ip:port`` -> ``plc_ip:port`` pinned to
@@ -222,10 +248,13 @@ class PortForward:
             if progress is not None:
                 progress(msg)
 
-        # Fail fast with a clear "log into acastus" message before creating
+        # Fail fast with a clear "log into <cluster>" message before creating
         # anything, rather than letting each kubectl call fail cryptically.
-        report("checking acastus login...")
-        check_auth()
+        report(f"checking {self._cluster} login...")
+        check_auth(cluster=self._cluster)
+        # Don't clobber a forward someone else already stood up on this IP:port.
+        report(f"checking {service_ip}:{port} is free...")
+        self._check_free(service_ip, port)
         name = name_for(port)
         # Record the name before applying so down() can clean up even if the
         # apply or the readiness/reachability waits below raise. _delete is
@@ -234,7 +263,9 @@ class PortForward:
         report(f"creating forward pod {name} on {node}...")
         self._delete(name)  # replace a stale forward rather than clash with it
         manifest = _manifest(name, node, plc_ip, service_ip, port)
-        _kubectl(["apply", "-f", "-"], stdin=json.dumps(manifest))
+        _kubectl(
+            ["apply", "-f", "-"], stdin=json.dumps(manifest), cluster=self._cluster
+        )
         report("waiting for socat pod to be ready...")
         self._wait_ready(name)
         # The pod being Ready isn't enough: aphyt connects to service_ip:port, and
@@ -245,12 +276,44 @@ class PortForward:
         self._wait_reachable(service_ip, port)
         return name
 
+    def _check_free(self, service_ip, port):
+        """Refuse to start if another LoadBalancer service already claims
+        ``service_ip:port``, so we don't collide with — or clobber — a forward
+        someone else stood up (two people forwarding the same node/PLC).
+
+        Only a *different* service counts: our own same-named stale forward is
+        replaced by ``up()``, so it's skipped. Matching on the port as well as
+        the IP means the permanent per-cell forward that legitimately shares this
+        IP on other ports (the terminal servers on 8026-8028) isn't mistaken for
+        a conflict. Scoped to our namespace, where the only thing that would bind
+        this port on this IP is another run of this tool. Checking declared
+        ownership (not a TCP probe) avoids racing MetalLB/kube-proxy routing lag.
+        """
+        mine = name_for(port)
+        out = _kubectl(
+            ["get", "svc", "-n", NAMESPACE, "-o", "json"], cluster=self._cluster
+        )
+        for svc in json.loads(out).get("items", []):
+            spec = svc.get("spec", {})
+            name = svc.get("metadata", {}).get("name")
+            if name == mine or spec.get("loadBalancerIP") != service_ip:
+                continue
+            if any(p.get("port") == port for p in spec.get("ports", [])):
+                raise PortForwardError(
+                    f"{service_ip}:{port} is already forwarded by service {name!r} "
+                    f"in the {NAMESPACE} namespace — someone else may be using this "
+                    "node. Refusing to clobber it; coordinate or use a different port."
+                )
+
     def _wait_ready(self, name):
         deadline = time.monotonic() + READY_TIMEOUT
         jsonpath = "jsonpath={.status.conditions[?(@.type=='Ready')].status}"
         while True:
             try:
-                out = _kubectl(["get", "pod", name, "-n", NAMESPACE, "-o", jsonpath])
+                out = _kubectl(
+                    ["get", "pod", name, "-n", NAMESPACE, "-o", jsonpath],
+                    cluster=self._cluster,
+                )
             except PortForwardError:
                 # The pod vanished between apply and now — e.g. evicted, or
                 # deleted by a controller/admission policy. Its events outlive
@@ -289,8 +352,7 @@ class PortForward:
                     ) from None
                 time.sleep(POLL_INTERVAL)
 
-    @staticmethod
-    def _diagnostics(name):
+    def _diagnostics(self, name):
         """Best-effort recent events for the pod, to explain a stuck or evicted
         forward. Never raises — diagnosis must not mask the original failure."""
         try:
@@ -306,7 +368,8 @@ class PortForward:
                     "-o",
                     "custom-columns=REASON:.reason,MESSAGE:.message",
                     "--no-headers",
-                ]
+                ],
+                cluster=self._cluster,
             )
         except PortForwardError:
             return ""
@@ -322,8 +385,7 @@ class PortForward:
         finally:
             self._name = None
 
-    @staticmethod
-    def _delete(name):
+    def _delete(self, name):
         # Force-delete the pod (--force --grace-period=0). A graceful delete only
         # sets a deletionTimestamp and leaves the actual removal to the kubelet on
         # the pod's node; when the node name is wrong/non-existent (e.g. a short
@@ -341,8 +403,10 @@ class PortForward:
                 "--ignore-not-found=true",
                 "--force",
                 "--grace-period=0",
-            ]
+            ],
+            cluster=self._cluster,
         )
         _kubectl(
-            ["delete", "service", name, "-n", NAMESPACE, "--ignore-not-found=true"]
+            ["delete", "service", name, "-n", NAMESPACE, "--ignore-not-found=true"],
+            cluster=self._cluster,
         )

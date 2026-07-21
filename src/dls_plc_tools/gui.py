@@ -38,7 +38,14 @@ from PySide6.QtWidgets import (
 )
 
 from dls_plc_tools.interrogate import INFO_TAGS, USED_MARKER_MEMBER, dims_str
-from dls_plc_tools.portforward import EIP_PORT, PortForward, resolve_host
+from dls_plc_tools.portforward import (
+    DEFAULT_CLUSTER,
+    EIP_PORT,
+    PortForward,
+    list_nodes,
+    name_for,
+    resolve_host,
+)
 
 CHANGED_BRUSH = QBrush(QColor("#ffd54f"))  # amber for values that just changed
 
@@ -86,6 +93,9 @@ class PlcWorker(QObject):
     exported = Signal(str)
     failed = Signal(str)
     progress = Signal(str)  # human-readable phase updates during a slow connect
+    nodes_ready = Signal(list)  # live cluster node names for the Node dropdown
+    # pod-status LED: (state inactive/pending/good, pod name — "" when inactive)
+    forward_status = Signal(str, str)
 
     def __init__(self):
         super().__init__()
@@ -118,24 +128,41 @@ class PlcWorker(QObject):
         except Exception as e:
             self.failed.emit(f"connect: {e}")
 
-    @Slot(str, str, str, int)
-    def connect_plc_forward(self, plc_ip, node, service_ip, port):
+    @Slot(str)
+    def list_nodes(self, cluster):
+        """Fetch the cluster's node names for the Node dropdown. Runs in the
+        worker thread because the kubectl call blocks (and needs a login); a
+        failure (e.g. not logged in) just surfaces via ``failed`` and leaves the
+        dropdown's static fallback list in place."""
+        try:
+            self.nodes_ready.emit(list_nodes(cluster))
+        except Exception as e:
+            self.failed.emit(f"list nodes: {e}")
+
+    @Slot(str, str, str, int, str)
+    def connect_plc_forward(self, plc_ip, node, service_ip, port, cluster):
         try:
             self.disconnect_plc()
             # The Service IP field accepts a literal IP or a DNS name (e.g.
             # sr19c-pfwd); resolve to the literal IP loadBalancerIP/MetalLB and
             # aphyt all need.
+            # name_for(port) is exactly the name up() gives the pod/service, so
+            # show it now (during stand-up) to make the running pod traceable.
+            self.forward_status.emit("pending", name_for(port))
             self.progress.emit(f"resolving {service_ip}...")
             service_ip = resolve_host(service_ip)
             # Register the forward *before* standing it up: up() creates the
             # pod/service and can then raise (e.g. pod never Ready), and the
             # except below only tears down what's in self._pfwd.
-            self._pfwd = PortForward()
+            self._pfwd = PortForward(cluster)
             self._pfwd.up(plc_ip, node, service_ip, port, progress=self.progress.emit)
             self.progress.emit(f"forward up; connecting to {service_ip}:{port}...")
             self._open_session(service_ip, port)
+            # pod ready, reachable, PLC connected
+            self.forward_status.emit("good", name_for(port))
         except Exception as e:
-            # Tear down a forward that came up but then failed to connect.
+            # Tear down a forward that came up but then failed to connect
+            # (disconnect_plc resets the LED to inactive).
             self.disconnect_plc()
             self.failed.emit(f"connect: {e}")
 
@@ -157,6 +184,7 @@ class PlcWorker(QObject):
             else:
                 self.progress.emit("port forward removed")
             self._pfwd = None
+        self.forward_status.emit("inactive", "")  # no forward pod now
 
     @Slot()
     def list_tags(self):
@@ -253,15 +281,22 @@ class PlcWorker(QObject):
 
 class MainWindow(QMainWindow):
     request_connect = Signal(str)
-    # (plc_ip, node, service_ip, port)
-    request_connect_forward = Signal(str, str, str, int)
+    # (plc_ip, node, service_ip, port, cluster)
+    request_connect_forward = Signal(str, str, str, int, str)
+    request_nodes = Signal(str)  # (cluster) -> refresh the Node dropdown
     request_tags = Signal()
     request_struct = Signal(str)
     request_export = Signal(str)
     request_disconnect = Signal()
 
     def __init__(
-        self, ip=None, port_forward=False, node=None, service_ip=None, port=None
+        self,
+        ip=None,
+        port_forward=False,
+        node=None,
+        service_ip=None,
+        port=None,
+        cluster=DEFAULT_CLUSTER,
     ):
         super().__init__()
         self.setWindowTitle("DLS PLC tools")
@@ -269,12 +304,14 @@ class MainWindow(QMainWindow):
         self._waiting = False
         self._current_struct = None
         self._previous = {}
+        self._cluster = cluster
 
         self._worker = PlcWorker()
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self.request_connect.connect(self._worker.connect_plc)
         self.request_connect_forward.connect(self._worker.connect_plc_forward)
+        self.request_nodes.connect(self._worker.list_nodes)
         self.request_tags.connect(self._worker.list_tags)
         self.request_struct.connect(self._worker.read_struct)
         self.request_export.connect(self._worker.export_structs)
@@ -285,6 +322,8 @@ class MainWindow(QMainWindow):
         self._worker.exported.connect(self._on_exported)
         self._worker.progress.connect(self._on_progress)
         self._worker.failed.connect(self._on_failed)
+        self._worker.nodes_ready.connect(self._on_nodes_ready)
+        self._worker.forward_status.connect(self._set_pod_status)
         self._thread.start()
 
         self._timer = QTimer(self)
@@ -293,11 +332,19 @@ class MainWindow(QMainWindow):
         # Top bar: connection. Fields prefill from the command line (see main).
         self.ip_edit = QLineEdit(ip or "")
         self.ip_edit.setPlaceholderText("e.g. 172.23.241.21")
-        self.ip_edit.setMaximumWidth(160)
+        # Fixed (not max) width: the field otherwise shrinks below usable size as
+        # the top bar competes for space. 180px comfortably fits a full IPv4.
+        self.ip_edit.setFixedWidth(180)
         # Port forwarding: reach a PLC on a private per-CIA network via a socat
         # forward on the cluster. Off by default; ticking it enables the fields
         # below and routes Connect through the forward (see _connect_clicked).
-        self.pfwd_check = QCheckBox("Port forward")
+        # Cluster is CLI-fixed (default acastus), so surface it in the checkbox
+        # label rather than a separate field — it's inseparable from the feature.
+        self.pfwd_check = QCheckBox(f"Port forward ({cluster})")
+        self.pfwd_check.setToolTip(
+            f"Stand up a socat forward on the {cluster} k8s cluster "
+            "(change with --cluster)"
+        )
         self.pfwd_check.setChecked(port_forward)
         # sr01c..sr24c pickers for the two per-cell fields. Both combos are
         # editable so a value not in the list (another cell, an explicit IP, a
@@ -322,6 +369,19 @@ class MainWindow(QMainWindow):
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
         self.disconnect_btn.setEnabled(False)  # nothing to disconnect until connected
+        # Pod-status LED for the forward's socat pod: red inactive, orange
+        # pending (standing up), green good (up and the PLC is reachable).
+        self.pod_led = QLabel()
+        self.pod_led.setFixedSize(14, 14)
+        self.pod_status_label = QLabel()
+        # Shows the pod/service name (pfwd-<user>-<port>) while a forward is up,
+        # so it can be traced with `kubectl get pod <name>`.
+        self.pod_name_label = QLabel()
+        self.pod_name_label.setStyleSheet("color: gray;")
+        self.pod_name_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse  # so the name can be copied
+        )
+        self._set_pod_status("inactive", "")
         self.info_label = QLabel("not connected")
         top = QHBoxLayout()
         top.addWidget(QLabel("IP address:"))
@@ -335,6 +395,10 @@ class MainWindow(QMainWindow):
         top.addWidget(self.port_spin)
         top.addWidget(self.connect_btn)
         top.addWidget(self.disconnect_btn)
+        top.addWidget(QLabel("Pod:"))
+        top.addWidget(self.pod_led)
+        top.addWidget(self.pod_status_label)
+        top.addWidget(self.pod_name_label)
         top.addWidget(self.info_label, stretch=1)
 
         # Left: tag browser
@@ -413,6 +477,41 @@ class MainWindow(QMainWindow):
         self.node_edit.setEnabled(checked)
         self.service_ip_edit.setEnabled(checked)
         self.port_spin.setEnabled(checked)
+        if checked:
+            # Replace the static sr01c..sr24c fallback with the cluster's real
+            # nodes, so the list tracks the cluster without code changes and the
+            # chosen name is a guaranteed-valid nodeName. Needs a login; on
+            # failure the fallback list stays and _on_failed shows why.
+            self.statusBar().showMessage(f"fetching {self._cluster} nodes...", 3000)
+            self.request_nodes.emit(self._cluster)
+
+    def _on_nodes_ready(self, nodes):
+        # Swap the fallback list for the live one, keeping any typed/prefilled
+        # node selected (it may not be in the fetched list — the combo is
+        # editable, so setCurrentText preserves it).
+        combo = self.node_edit
+        current = combo.currentText()
+        combo.clear()
+        combo.addItems(nodes)
+        if current:
+            combo.setCurrentText(current)
+        else:
+            combo.setCurrentIndex(-1)  # show the placeholder
+        self.statusBar().showMessage(f"{len(nodes)} nodes from {self._cluster}", 3000)
+
+    def _set_pod_status(self, state, name=""):
+        """Colour the forward pod's LED and label, and show its ``name`` (blank
+        when inactive). ``state`` is one of ``inactive`` (red — no forward),
+        ``pending`` (orange — standing up), or ``good`` (green — up and
+        reachable)."""
+        colour = {
+            "inactive": "#c0392b",  # red
+            "pending": "#e67e22",  # orange
+            "good": "#27ae60",  # green
+        }.get(state, "#c0392b")
+        self.pod_led.setStyleSheet(f"background-color: {colour}; border-radius: 7px;")
+        self.pod_status_label.setText(state)
+        self.pod_name_label.setText(name)
 
     def _connect_clicked(self):
         ip = self.ip_edit.text().strip()
@@ -428,9 +527,10 @@ class MainWindow(QMainWindow):
                 )
                 return
             self.info_label.setText(
-                f"port forward {service_ip}:{port} -> {ip} via {node}..."
+                f"port forward ({self._cluster}) {service_ip}:{port} -> {ip} "
+                f"via node {node}..."
             )
-            self.request_connect_forward.emit(ip, node, service_ip, port)
+            self.request_connect_forward.emit(ip, node, service_ip, port, self._cluster)
         else:
             self.info_label.setText(f"connecting to {ip}...")
             self.request_connect.emit(ip)
@@ -609,6 +709,12 @@ def main():
         default=EIP_PORT,
         help=f"forward / EtherNet-IP port (default: {EIP_PORT})",
     )
+    parser.add_argument(
+        "--cluster",
+        default=DEFAULT_CLUSTER,
+        help="k8s cluster for the port forward — selects the klogin to source "
+        f"(default: {DEFAULT_CLUSTER}); only acastus has the forward set up",
+    )
     args = parser.parse_args()
     app = QApplication(sys.argv)
     window = MainWindow(
@@ -617,6 +723,7 @@ def main():
         node=args.node,
         service_ip=args.service_ip,
         port=args.port,
+        cluster=args.cluster,
     )
     window.show()
     sys.exit(app.exec())

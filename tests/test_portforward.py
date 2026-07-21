@@ -50,6 +50,8 @@ class FakeRun:
             self.applied = json.loads(input)
             return _ok()
         if verb == "get":
+            if "svc" in args:
+                return _ok('{"items": []}')  # _check_free: no conflicting service
             return _ok(self._get_stdout)
         return _ok()  # delete
 
@@ -216,6 +218,8 @@ def test_up_reports_events_when_pod_disappears(monkeypatch):
     # get pod -> NotFound (evicted), but get events still returns the reason.
     def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
         args = cmd[4:]
+        if args[:2] == ["get", "svc"]:
+            return _ok('{"items": []}')  # _check_free: nothing else claims the IP
         if args[:2] == ["get", "pod"]:
             return SimpleNamespace(returncode=1, stdout="", stderr='pods "x" not found')
         if args[:2] == ["get", "events"]:
@@ -326,6 +330,117 @@ def test_kubectl_timeout_is_wrapped(monkeypatch):
     monkeypatch.setattr(portforward.subprocess, "run", stall)
     with pytest.raises(PortForwardError, match="timed out"):
         portforward._kubectl(["get", "pod", "x"])
+
+
+def test_list_nodes_strips_node_prefix(monkeypatch):
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        args = cmd[4:]
+        if args[:2] == ["auth", "whoami"]:
+            return _ok()  # authenticated
+        assert args == ["get", "nodes", "-o", "name"]
+        return _ok("node/sr01c-k8s-serv-01.example\nnode/sr02c-k8s-serv-01.example\n")
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+    assert portforward.list_nodes() == [
+        "sr01c-k8s-serv-01.example",
+        "sr02c-k8s-serv-01.example",
+    ]
+
+
+def test_list_nodes_reports_login_when_logged_out(monkeypatch):
+    # A logged-out node fetch gives the friendly "log in" message, not a raw
+    # kubectl error, and never queries nodes.
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        args = cmd[4:]
+        if args[:2] == ["auth", "whoami"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="Unauthorized")
+        raise AssertionError(f"should not query {args} when logged out")
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+    with pytest.raises(PortForwardError, match="not logged into acastus"):
+        portforward.list_nodes()
+
+
+def test_up_aborts_when_service_ip_port_taken(monkeypatch):
+    # Another service already claims service_ip:44818 -> abort before creating
+    # anything, naming the conflicting service.
+    other = {
+        "metadata": {"name": "pfwd-someone-44818"},
+        "spec": {"loadBalancerIP": "172.23.206.158", "ports": [{"port": 44818}]},
+    }
+
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        args = cmd[4:]
+        if args[:2] == ["auth", "whoami"]:
+            return _ok()
+        if args[:2] == ["get", "svc"]:
+            return _ok(json.dumps({"items": [other]}))
+        raise AssertionError(f"should not reach {args} when the port is taken")
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+    with pytest.raises(PortForwardError, match="already forwarded by service"):
+        PortForward().up("192.168.8.10", "node", "172.23.206.158", 44818)
+
+
+def test_check_free_ignores_own_forward_and_other_ports(monkeypatch):
+    # Our own same-named stale forward and the permanent forward sharing the IP
+    # on other ports must NOT count as conflicts, so up() proceeds to apply.
+    items = [
+        {  # our own stale forward (same name) — replaced by up(), not a conflict
+            "metadata": {"name": "pfwd-tester-44818"},
+            "spec": {"loadBalancerIP": "172.23.206.158", "ports": [{"port": 44818}]},
+        },
+        {  # permanent per-cell forward: same IP, terminal-server port
+            "metadata": {"name": "sr08c-pfwd"},
+            "spec": {"loadBalancerIP": "172.23.206.158", "ports": [{"port": 8026}]},
+        },
+    ]
+
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        args = cmd[4:]
+        if args[:2] == ["auth", "whoami"]:
+            return _ok()
+        if args[:2] == ["get", "svc"]:
+            return _ok(json.dumps({"items": items}))
+        if args[:2] == ["get", "pod"]:
+            return _ok("True")
+        return _ok()
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+    # must not raise
+    PortForward().up("192.168.8.10", "node", "172.23.206.158", 44818)
+
+
+def test_cluster_selects_klogin_script(monkeypatch):
+    scripts = []
+
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        scripts.append(cmd[2])  # the bash -c script
+        return _ok("ok")
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+    portforward._kubectl(["get", "pod", "x"], cluster="tuscana")
+    assert f"{portforward.KLOGIN_DIR}/tuscana" in scripts[0]
+
+
+def test_up_threads_cluster_through_every_call(monkeypatch):
+    scripts = []
+
+    def run(cmd, input=None, stdin=None, capture_output=True, text=True, timeout=30):
+        scripts.append(cmd[2])
+        verb = cmd[4]
+        if verb == "get" and cmd[5] == "svc":
+            return _ok('{"items": []}')
+        if verb == "get" and cmd[5] == "pod":
+            return _ok("True")
+        if verb == "apply":
+            return _ok()
+        return _ok()
+
+    monkeypatch.setattr(portforward.subprocess, "run", run)
+    PortForward(cluster="tuscana").up("192.168.8.10", "node", "172.23.206.158", 44818)
+    assert scripts, "expected kubectl calls"
+    assert all(f"{portforward.KLOGIN_DIR}/tuscana" in s for s in scripts)
 
 
 def test_kubectl_forces_noninteractive_stdin(monkeypatch):

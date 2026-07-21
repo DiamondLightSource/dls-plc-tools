@@ -24,11 +24,14 @@ def gui(qapp):
     win = MainWindow()
     win.request_connect.disconnect()
     win.request_connect_forward.disconnect()
+    win.request_nodes.disconnect()  # don't let ticking the box run real kubectl
     direct: list = []
-    forward: list = []  # tuples of (plc_ip, node, service_ip, port)
+    forward: list = []  # tuples of (plc_ip, node, service_ip, port, cluster)
+    nodes: list = []  # cluster names the Node-refresh was requested for
     win.request_connect.connect(lambda ip: direct.append(ip))
     win.request_connect_forward.connect(lambda *a: forward.append(a))
-    yield SimpleNamespace(win=win, direct=direct, forward=forward)
+    win.request_nodes.connect(lambda c: nodes.append(c))
+    yield SimpleNamespace(win=win, direct=direct, forward=forward, nodes=nodes)
     win.close()
 
 
@@ -62,7 +65,7 @@ def test_forward_connect_when_checked(gui):
     gui.win._connect_clicked()
     assert gui.direct == []
     assert gui.forward == [
-        ("192.168.8.10", "sr08c-node.example", "172.23.206.158", 44818)
+        ("192.168.8.10", "sr08c-node.example", "172.23.206.158", 44818, "acastus")
     ]
 
 
@@ -83,3 +86,41 @@ def test_forward_requires_node_and_service_ip(gui):
     gui.win._connect_clicked()
     assert gui.forward == []
     assert gui.direct == []
+
+
+def test_pod_status_led_updates(gui):
+    # LED starts inactive with no pod name; each state recolours the dot.
+    assert gui.win.pod_status_label.text() == "inactive"
+    assert gui.win.pod_name_label.text() == ""
+    seen = set()
+    for state in ("pending", "good", "inactive"):
+        gui.win._set_pod_status(state)
+        assert gui.win.pod_status_label.text() == state
+        style = gui.win.pod_led.styleSheet()
+        assert "background-color" in style
+        seen.add(style)
+    assert len(seen) == 3  # a distinct colour per state
+
+
+def test_pod_name_shown_while_active_and_cleared(gui):
+    gui.win._set_pod_status("good", "pfwd-tester-44818")
+    assert gui.win.pod_name_label.text() == "pfwd-tester-44818"
+    gui.win._set_pod_status("inactive", "")  # teardown clears the name
+    assert gui.win.pod_name_label.text() == ""
+
+
+def test_ticking_box_requests_node_refresh(gui):
+    # Ticking Port forward asks the worker for the cluster's live node list.
+    gui.win.pfwd_check.setChecked(True)
+    assert gui.nodes == ["acastus"]
+
+
+def test_nodes_ready_repopulates_combo_keeping_selection(gui):
+    combo = gui.win.node_edit
+    typed = "sr19c-k8s-serv-01.pri.diamond.ac.uk"  # a typed/prefilled node
+    combo.setCurrentText(typed)
+    gui.win._on_nodes_ready(["nodeA", "nodeB"])
+    items = [combo.itemText(i) for i in range(combo.count())]
+    assert items == ["nodeA", "nodeB"]  # static fallback replaced by live list
+    # the typed value is preserved even though it isn't in the fetched list
+    assert combo.currentText() == typed
