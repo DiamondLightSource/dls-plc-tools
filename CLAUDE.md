@@ -211,3 +211,25 @@ Pushing a git tag runs the full CI matrix and, on success, publishes to PyPI
 via trusted publishing (GitHub environment `release`) and creates a GitHub
 release. Any tag triggers this — don't push scratch tags. Version comes from
 the tag via setuptools_scm.
+
+## Windows binary (frozen exe)
+
+For DLS Windows workstations with IT policies that block uv/pip, CI freezes a
+standalone `dls-plc-tools.exe` with PyInstaller (`_windows-exe.yml`, driven by
+`packaging/dls-plc-tools.spec`) and — because `_release.yml` attaches every run
+artifact (`files: "*"`) — it lands on the GitHub release. Users download the one
+file; no Python/uv/pip on the target. The `windows-exe` job runs on every
+push/PR (so freeze breakage is caught early) and `release` `needs` it, so a
+broken freeze blocks the tagged release. The spec force-collects `aphyt`'s
+submodules because the CLI/GUI lazy-import it *inside* functions and aphyt
+imports its CIP classes dynamically — PyInstaller's static graph misses them
+otherwise; PySide6 rides its bundled Qt hook. Built `console=True` so `read`'s
+stdout works (GUI users get a spare console window — don't flip to windowed).
+CI's smoke test only runs `--version`/`--help` (no heavy-dep import); exercising
+aphyt/Qt still needs a real PLC per the rule above. The GUI's k8s **port-forward
+path won't work on Windows** (no kubectl/klogin) — the exe is for the `read` CLI
+and direct-IP GUI connections. If AppLocker/WDAC allowlisting is in play, a
+self-built exe is blocked too and IT must whitelist the hash/publisher — a
+different problem the freeze doesn't solve. Build locally to reproduce:
+`uv sync && uv pip install pyinstaller && uv run pyinstaller --clean --noconfirm
+packaging/dls-plc-tools.spec`.

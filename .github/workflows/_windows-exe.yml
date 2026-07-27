@@ -1,0 +1,42 @@
+on:
+  workflow_call:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Need this so setuptools_scm can derive the version from the last tag
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install runtime deps + PyInstaller
+        # uv sync installs the project (editable), which triggers setuptools_scm
+        # to write _version.py. PyInstaller goes into the same venv so it can see
+        # aphyt / PySide6 when it freezes them.
+        run: |
+          uv sync
+          uv pip install pyinstaller
+
+      - name: Build single-file exe
+        run: uv run pyinstaller --clean --noconfirm packaging/dls-plc-tools.spec
+
+      - name: Smoke test the frozen exe
+        # --version / --help don't import the heavy deps, so this only proves the
+        # bootloader + Typer wiring froze. Exercising aphyt / Qt needs a real PLC
+        # (see CLAUDE.md); do that on a workstation before trusting a release.
+        run: |
+          dist/dls-plc-tools.exe --version
+          dist/dls-plc-tools.exe --help
+          dist/dls-plc-tools.exe read --help
+
+      - name: Upload exe as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/dls-plc-tools.exe

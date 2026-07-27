@@ -29,6 +29,8 @@ var/
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...but our checked-in spec drives the CI Windows-exe build:
+!packaging/dls-plc-tools.spec
 
 # Installer logs
 pip-log.txt
