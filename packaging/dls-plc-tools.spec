@@ -15,11 +15,15 @@
 # - console=True: this is a CLI (`read`) with a GUI subcommand (`gui`). A
 #   console build keeps `read`'s stdout working; GUI users get a harmless
 #   console window alongside. Don't flip to windowed or the CLI goes mute.
+# - Freezes packaging/entrypoint.py, NOT dls_plc_tools/__main__.py: the latter
+#   as a top-level script has no parent package, so its relative imports crash
+#   (ImportError: attempted relative import with no known parent package). The
+#   shim imports the package absolutely so those imports resolve.
 import os
 
 from PyInstaller.utils.hooks import collect_submodules
 
-script = os.path.join(SPECPATH, os.pardir, "src", "dls_plc_tools", "__main__.py")
+script = os.path.join(SPECPATH, "entrypoint.py")
 
 hiddenimports = collect_submodules("aphyt") + collect_submodules("openpyxl")
 
