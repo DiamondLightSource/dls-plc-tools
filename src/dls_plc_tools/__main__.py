@@ -132,10 +132,20 @@ def read(
         typer.Option(
             "-m",
             "--members",
-            help="comma-separated members to show with --detail "
+            help="comma-separated members to show with --detail; nested members "
+            "take a dotted path, e.g. -m Desc,IMG.W "
             "(default: Desc,State,Status,Status_String,ILK_Status)",
         ),
     ] = None,
+    expand_all: Annotated[
+        bool,
+        typer.Option(
+            "-e",
+            "--expand-all",
+            help="with --detail, show every member including a column per "
+            "nested-structure leaf, ignoring --members",
+        ),
+    ] = False,
     interval: Annotated[
         float, typer.Option(help="refresh period in seconds for --detail (min: 0.5)")
     ] = 2.0,
@@ -151,6 +161,7 @@ def read(
         show=show,
         members=members,
         interval=interval,
+        expand_all=expand_all,
     )
 
 

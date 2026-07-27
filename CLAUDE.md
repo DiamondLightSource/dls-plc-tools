@@ -154,7 +154,11 @@ already exercised — its sibling classes have inconsistent APIs.
   client-side — it is also fewer requests.
 - `read_variable` returns native Python values for scalars but
   `CIPStructure`/`CIPArray` instances for compound types; call `.value()` on
-  a `CIPArray` to get a list.
+  a `CIPArray` to get a list. `.value()` is *not* uniformly a Python value:
+  BYTE/WORD/DWORD/LWORD/TIME return raw `bytes`, an array of structs returns a
+  list of `CIPStructure`, and `CIPStructure.value()` returns the struct itself
+  (it mutates members in place). Go through `structure.py` rather than
+  `str()`-ing whatever comes back — see the nested-structures section.
 - Unknown structure members raise `KeyError` (client-side resolution), not
   `CIPException` — catch both.
 - The tag dictionary lives at `connected_cip_dispatcher.user_variables` /
@@ -165,6 +169,68 @@ already exercised — its sibling classes have inconsistent APIs.
 - `NSeries.__enter__` installs a SIGINT handler — fine in the CLI, but do
   not use the context manager off the main thread (the GUI worker constructs
   directly and calls `close_explicit()`).
+
+## Nested structures (members that aren't CIP primitives)
+
+Most members are primitives, so a member is a column. Some are not: a member can
+be an `ARRAY[..] OF <struct>` (`V.ILK[x]`, "Array [1..xxx] of EPICS Valve INTLK
+STRUCT"), a plain nested struct, or a struct inside one of those
+(`Gauge[x].IMG.W`, alongside a 16-bit `IMG.B`). aphyt decodes all of them, but
+`CIPArray.value()` then hands back a list of `CIPStructure` objects, and
+`str()` of one is aphyt's repr — which is what used to land in a table cell:
+
+    Ilk[1] ->  { type: ILK_Type | members: {'Trip': 1, 'Msg': HiVac} }
+
+`structure.py` is the single answer for all three front-ends. `flatten()` turns
+a read result into a tree of `Member` nodes keyed by dotted path; leaves hold
+one value per instance row, branches hold children *plus* a per-row summary
+(`Trip=1 Msg=HiVac`) so they can be shown collapsed. `columns_for(members,
+expanded)` picks the visible columns. Rules that matter:
+
+- Rows stay one-per-instance. An `ARRAY OF <struct>` has exactly one struct per
+  row, so its leaves line up with the flat members — this is why flattening
+  works at all, and why it must not be applied to top-level arrays.
+- **A plain nested struct is another structure-of-arrays, not one value.**
+  `PSU.Status.W[1]` is the convention applied one level down: `Status` groups
+  per-instance members, so `Status.W` is a column with one value per row. It is
+  *not* a scalar living on row 0 — treating it that way strands every
+  instance's value in one comma-joined cell (`16#0000,16#002C,16#0000,…`).
+  `_member()` therefore recurses into it with the same rules as the tag root.
+  Its bytes are only sliced into its members when `value()` is called on it —
+  an array's own `value()` already does that per element, a plain member's does
+  not.
+- **The parent decides whether a nested array is instance-indexed.** Under a
+  plain nested struct it is (above). Under an `ARRAY OF <struct>` it is not:
+  `Gauge[x].IMG.B` is one gauge's own 16 bits, so it stays joined in a single
+  cell rather than adding 16 columns. All-boolean lists render as a bit string
+  in groups of eight, index 0 leftmost. `_member()` handles the first context,
+  `_child()` the second — keep them distinct.
+- **BYTE/WORD/DWORD/LWORD return raw `bytes` from aphyt's `value()`**, so every
+  DLS status word (`ILK_Status`, `Control`, `Fault`, `PSU.Status.W`) renders as
+  `b'A\x00'` unless formatted. `cell_text` writes them `16#0041`, the notation
+  the tag spreadsheet uses.
+- Type names are mapped to PLC names (`INT`, `WORD`, `ARRAY[0..15] OF BOOL`,
+  and a struct's own `variable_type_name`), not `CIPInteger`.
+
+GUI: branches start collapsed as one summary column headed `▸ Ilk`; clicking the
+header expands it into `Ilk.Trip`/`Ilk.Msg` and the header becomes `▾ Ilk`. The
+branch column is kept when expanded because it *is* the collapse affordance.
+The last read is cached (`_members`), so expanding, filtering and the in-use
+toggle redraw without another PLC read, and expansion survives a poll but is
+dropped when a different tag is watched. The filter matches descendant paths, so
+filtering `Trip` still surfaces a collapsed `Ilk`. CLI: `-m` takes dotted paths
+and expands just enough to reach them (`-m Desc,IMG.W`); naming a branch leaves
+it collapsed; `-e/--expand-all` shows every leaf and drops the now-redundant
+branch columns. `-s/--show` prints the tree, and the paths it prints are exactly
+what `-m` accepts. The Excel export always expands fully — a sheet has no
+expand affordance — one row per dotted leaf path, native scalars left numeric.
+
+Unverified against hardware: aphyt assigns nested struct members with
+`members[name] = ...` rather than `add_member`, so a nested struct's
+`_alignment` stays 0 and its parent's `value()` applies no alignment padding
+beyond a 1-byte bump. If a nested struct's members force an alignment >2 the
+offsets could be wrong and the *values* (not just their display) would be
+garbage. Check a known nested tag against Sysmac before trusting deep nesting.
 
 ## DLS PLC conventions
 
@@ -184,10 +250,48 @@ already exercised — its sibling classes have inconsistent APIs.
 
 ## Development
 
+### Never let `uv` touch `.venv` — always set `UV_PROJECT_ENVIRONMENT`
+
+**Export `UV_PROJECT_ENVIRONMENT=/root/.venvs/<repo>` before any `uv` command in
+`/workspaces`.** Not a fallback — the default, every time.
+
+`/workspaces` is a bind mount shared between the host user (`jjc62351`) and
+containers running as `root`, but a `.venv` records its interpreter's
+**absolute path**. The owner's venvs point at
+`/home/jjc62351/.local/share/uv/python/...` or `/usr/bin/python3.11` — correct
+on the host, and *expected* to look dangling from inside a container. That is
+the healthy state, not a fault to repair.
+
+The damage runs the other way. uv reacts to an interpreter it cannot resolve by
+**deleting the venv and rebuilding it** — one `warning:` line that scrolls past,
+**exit 0**, looks like a slow first run. The rebuild repoints `.venv` at
+`/root/.local/share/uv/python/...`, so the repo is handed back **broken on the
+host**, and the owner's next `uv run` rebuilds it back again. Ping-pong, once
+per session, plus anything outside `uv.lock` (a hand-installed `pyinstaller`
+for a local exe build, an editable sibling module) destroyed each way.
+
+Checking `.venv/bin/python -V` first does *not* protect against this: after uv
+has rebuilt the venv the probe passes happily, and it is the host copy that is
+now broken. Only keeping the environment off the shared mount does. Measured on
+uv 0.9.9 — no flag helps:
+
+| command | `.venv` uv cannot resolve |
+| --- | --- |
+| `uv run …`, `uv run --no-sync …` | **rebuilt, repointed at the container** |
+| `uv sync`, `uv sync --frozen` | **rebuilt, repointed at the container** |
+| `uv pip list` | untouched (not a project command) |
+| anything with `UV_PROJECT_ENVIRONMENT` set off-mount | untouched ✓ |
+
+If a repo's `.venv` is already pointing into `/root`, a container run has
+clobbered it. It self-heals — the owner's next `uv` command on the host rebuilds
+it — but say so rather than leaving them to hit it.
+
 ```bash
+export UV_PROJECT_ENVIRONMENT=/root/.venvs/dls-plc-tools   # do this first
 uv sync
 uv run dls-plc-tools read <ip>     # discover + summarise all structures
 uv run dls-plc-tools read --help   # -l list, -s show members, -d live watch
+uv run dls-plc-tools read <ip> -d V -e   # live watch, nested members expanded
 uv run dls-plc-tools gui <ip>
 uv run tox -p                       # pre-commit, pyright, pytest
 ```
@@ -202,6 +306,18 @@ uv run tox -p                       # pre-commit, pyright, pytest
 - No PLC is reachable from CI or dev containers. Test logic with mocked
   `read_variable` payloads; test the GUI headless with
   `QT_QPA_PLATFORM=offscreen` (grab-and-assert on the table works well).
+  `tests/nested.py` builds the CIP objects aphyt would return for the nested
+  shapes the tag spreadsheet declares (array-of-struct, nested struct, nested
+  BOOL array), byte layouts included — reuse it rather than hand-rolling more.
+- **`tests/test_gui.py` skips itself where `libGL.so.1` is missing** (this dev
+  container), so a GUI regression can sit green locally and only fail in CI —
+  three `QComboBox.setText` calls had rotted that way. If you touch the GUI,
+  actually run those tests: fetch the system libs into a sysroot
+  (`apt-get download --print-uris libgl1 libglx0 libglvnd0 libfontconfig1
+  libfreetype6 libx11-6 libxcb1 libxau6 libxdmcp6 libbsd0 libmd0 libpng16-16t64
+  libbrotlidec1 libbrotlicommon1 libexpat1 libxkbcommon0 libdbus-1-3` → curl →
+  `dpkg-deb -x`) and point `LD_LIBRARY_PATH` at it. apt's own download method
+  fails here (it cannot `setgroups`), hence `--print-uris` + curl.
   Anything touching a new aphyt code path needs a check against a real PLC —
   say so in the PR if that hasn't been done.
 

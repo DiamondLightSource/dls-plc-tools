@@ -60,8 +60,8 @@ def test_direct_connect_when_unchecked(gui):
 def test_forward_connect_when_checked(gui):
     gui.win.ip_edit.setText("192.168.8.10")
     gui.win.pfwd_check.setChecked(True)
-    gui.win.node_edit.setText("sr08c-node.example")
-    gui.win.service_ip_edit.setText("172.23.206.158")
+    gui.win.node_edit.setCurrentText("sr08c-node.example")
+    gui.win.service_ip_edit.setCurrentText("172.23.206.158")
     gui.win._connect_clicked()
     assert gui.direct == []
     assert gui.forward == [
@@ -72,8 +72,8 @@ def test_forward_connect_when_checked(gui):
 def test_port_override_passed_through(gui):
     gui.win.ip_edit.setText("192.168.8.10")
     gui.win.pfwd_check.setChecked(True)
-    gui.win.node_edit.setText("node")
-    gui.win.service_ip_edit.setText("172.23.206.158")
+    gui.win.node_edit.setCurrentText("node")
+    gui.win.service_ip_edit.setCurrentText("172.23.206.158")
     gui.win.port_spin.setValue(2222)
     gui.win._connect_clicked()
     assert gui.forward[0][3] == 2222
@@ -82,7 +82,7 @@ def test_port_override_passed_through(gui):
 def test_forward_requires_node_and_service_ip(gui):
     gui.win.ip_edit.setText("192.168.8.10")
     gui.win.pfwd_check.setChecked(True)
-    gui.win.service_ip_edit.setText("172.23.206.158")  # node left blank
+    gui.win.service_ip_edit.setCurrentText("172.23.206.158")  # node left blank
     gui.win._connect_clicked()
     assert gui.forward == []
     assert gui.direct == []
@@ -124,3 +124,145 @@ def test_nodes_ready_repopulates_combo_keeping_selection(gui):
     assert items == ["nodeA", "nodeB"]  # static fallback replaced by live list
     # the typed value is preserved even though it isn't in the fetched list
     assert combo.currentText() == typed
+
+
+def _watch_nested(win):
+    """Feed the window a flattened nested structure as if the worker had read
+    it, bypassing the PLC."""
+    from dls_plc_tools.structure import flatten
+    from nested import make_struct
+
+    win._current_struct = "Gauge"
+    members, start = flatten(make_struct(), "Gauge")
+    win._on_struct("Gauge", members, start)
+    return win
+
+
+def _headers(win):
+    return [
+        win.table.horizontalHeaderItem(c).text() for c in range(win.table.columnCount())
+    ]
+
+
+def _column(win, header):
+    return _headers(win).index(header)
+
+
+def test_nested_member_starts_collapsed_with_a_summary(gui):
+    win = _watch_nested(gui.win)
+    assert _headers(win) == ["Desc", "State", "▸ Ilk", "▸ Status"]
+    # The cell holds a readable summary, not aphyt's CIPStructure repr.
+    assert (
+        win.table.item(0, _column(win, "▸ Ilk"))
+        .text()
+        .startswith("Trip=1 Msg=HiVac IMG={")
+    )
+
+
+def test_header_click_expands_and_collapses_a_nested_member(gui):
+    win = _watch_nested(gui.win)
+    win._header_clicked(_column(win, "▸ Ilk"))
+    assert _headers(win) == [
+        "Desc",
+        "State",
+        "▾ Ilk",
+        "Ilk.Trip",
+        "Ilk.Msg",
+        "▸ Ilk.IMG",
+        "▸ Status",
+    ]
+    assert win.table.item(0, _column(win, "Ilk.Msg")).text() == "HiVac"
+    win._header_clicked(_column(win, "▾ Ilk"))
+    assert _headers(win) == ["Desc", "State", "▸ Ilk", "▸ Status"]
+
+
+def test_clicking_a_leaf_header_does_nothing(gui):
+    win = _watch_nested(gui.win)
+    win._header_clicked(_column(win, "Desc"))
+    assert _headers(win) == ["Desc", "State", "▸ Ilk", "▸ Status"]
+
+
+def test_expand_nested_checkbox_expands_every_branch(gui):
+    win = _watch_nested(gui.win)
+    win.expand_all.setChecked(True)
+    assert _headers(win) == [
+        "Desc",
+        "State",
+        "▾ Ilk",
+        "Ilk.Trip",
+        "Ilk.Msg",
+        "▾ Ilk.IMG",
+        "Ilk.IMG.W",
+        "Ilk.IMG.B",
+        "▾ Status",
+        "Status.W",
+        "Status.Code",
+    ]
+    win.expand_all.setChecked(False)
+    assert _headers(win) == ["Desc", "State", "▸ Ilk", "▸ Status"]
+
+
+def test_filter_matches_members_inside_a_collapsed_branch(gui):
+    win = _watch_nested(gui.win)
+    win.filter_edit.setText("Trip")
+    # Ilk stays collapsed but is still surfaced, so the filter does not appear
+    # to lose a member that exists.
+    assert _headers(win) == ["▸ Ilk"]
+
+
+def test_expansion_state_survives_a_refresh(gui):
+    win = _watch_nested(gui.win)
+    win._header_clicked(_column(win, "▸ Ilk"))
+    _watch_nested(win)  # a later poll delivers a fresh read of the same tag
+    assert "Ilk.Trip" in _headers(win)
+
+
+def test_watching_a_different_tag_resets_expansion(gui):
+    win = _watch_nested(gui.win)
+    win._header_clicked(_column(win, "▸ Ilk"))
+    win.struct_edit.setText("Other")
+    win._watch_clicked()
+    assert win._expanded == set()
+    assert win._members is None
+
+
+def test_in_use_filter_uses_the_marker_member(gui):
+    win = _watch_nested(gui.win)
+    # Desc is non-empty for two of the three declared instances.
+    assert win.used_only.isChecked()
+    assert win.table.rowCount() == 2
+    win.used_only.setChecked(False)
+    assert win.table.rowCount() == 3
+
+
+def test_export_expands_nested_members_into_rows(gui, tmp_path):
+    """The workbook has no expand affordance, so every nested leaf gets a row —
+    and no cell holds aphyt's CIPStructure repr."""
+    from types import SimpleNamespace
+
+    from openpyxl import load_workbook
+
+    from dls_plc_tools.gui import PlcWorker
+    from nested import make_struct
+
+    struct = make_struct()
+    worker = PlcWorker()
+    # A stand-in for the aphyt session: only the three calls export uses.
+    worker._eip = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
+        update_variable_dictionary=lambda: None,
+        connected_cip_dispatcher=SimpleNamespace(user_variables={"Gauge": struct}),
+        read_variable=lambda name: struct,
+    )
+    path = tmp_path / "structs.xlsx"
+    worker.export_structs(str(path))
+
+    sheet = load_workbook(path)["Gauge"]
+    rows = {r[0]: list(r[1:]) for r in sheet.iter_rows(values_only=True)}
+    assert rows["Gauge"] == [1, 2, 3]  # instance indices, ARRAY[1..3]
+    assert rows["Ilk.Trip"] == [1, 0, 0]  # numbers stay numeric
+    # The unused third instance has an empty Msg, which reads back as a blank cell.
+    assert rows["Ilk.Msg"] == ["HiVac", "Ok", None]
+    assert rows["Ilk.IMG.W"][0] == "16#0041"
+    # The nested struct-of-arrays spreads down the instance columns.
+    assert rows["Status.W"] == ["16#0000", "16#002C", "16#0000"]
+    assert not any("CIPStructure" in str(v) for row in rows.values() for v in row)

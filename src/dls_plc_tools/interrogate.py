@@ -13,6 +13,18 @@ from aphyt import omron
 from aphyt.cip.cip import CIPException
 from aphyt.cip.cip_datatypes import CIPArray, CIPStructure
 
+from dls_plc_tools.structure import (
+    ancestors,
+    branch_paths,
+    columns_for,
+    dims_str,
+    find,
+    flatten,
+    row_count,
+    row_text,
+    type_name,
+)
+
 # Tags printed as a header for every mode.
 INFO_TAGS = ["PLC_Name", "PLC_Status", "Epics_Num_dev"]
 
@@ -28,27 +40,42 @@ RESET = "\x1b[0m"
 CLEAR = "\x1b[H\x1b[2J"
 
 
-def dims_str(member):
-    return ", ".join(
-        f"{s}..{s + n - 1}"
-        for s, n in zip(
-            member.start_array_elements, member.number_of_elements, strict=True
-        )
-    )
-
-
 def summarise_struct(name, struct):
     print(f"\n{name}: {struct.variable_type_name}")
 
-    arrays = {m: v for m, v in struct.members.items() if isinstance(v, CIPArray)}
-    scalars = [m for m in struct.members if m not in arrays]
+    members = struct.members
+    # Members are grouped by shape rather than lumped together, because a
+    # member that is not a CIP primitive is exactly what needs calling out.
+    primitive_arrays = {
+        m: v
+        for m, v in members.items()
+        if isinstance(v, CIPArray)
+        and not isinstance(v.local_cip_data_type_object, CIPStructure)
+    }
+    struct_arrays = {
+        m: v
+        for m, v in members.items()
+        if isinstance(v, CIPArray)
+        and isinstance(v.local_cip_data_type_object, CIPStructure)
+    }
+    nested = {m: v for m, v in members.items() if isinstance(v, CIPStructure)}
+    scalars = [
+        m
+        for m in members
+        if m not in primitive_arrays and m not in struct_arrays and m not in nested
+    ]
 
-    for dims, count in Counter(dims_str(v) for v in arrays.values()).most_common():
+    counted = Counter(dims_str(v) for v in primitive_arrays.values()).most_common()
+    for dims, count in counted:
         print(f"  {count} array members of ARRAY[{dims}]")
+    for member, value in struct_arrays.items():
+        print(f"  {member}: {type_name(value)}  (nested structure)")
+    for member, value in nested.items():
+        print(f"  {member}: {type_name(value)}  (nested structure)")
     if scalars:
         print(f"  scalar members: {', '.join(scalars)}")
 
-    marker = arrays.get(USED_MARKER_MEMBER)
+    marker = primitive_arrays.get(USED_MARKER_MEMBER)
     if marker is not None:
         try:
             start = marker.start_array_elements[0]
@@ -74,32 +101,47 @@ def list_all_tags(eip):
     print(f"\n{len(user_variables)} user tags ({system_count} system tags not shown)")
 
 
-def member_values(struct_instance, member):
-    """Return a member's contents as a list, or None if it is missing."""
-    value = struct_instance.members.get(member)
-    if value is None:
-        return None
-    if isinstance(value, CIPArray):
-        return value.value()
-    return [value.value()]  # scalar member: single-row column
-
-
 def show_struct(eip, struct):
-    """Print every member of a structure with its type and array bounds."""
+    """Print every member of a structure with its type and array bounds.
+
+    Nested structures are printed indented under their parent, with the dotted
+    path that ``--members`` takes, so the output doubles as the column menu.
+    """
     result = eip.read_variable(struct)
     if not isinstance(result, CIPStructure):
         print(f"{struct} is a {type(result).__name__}, not a structure")
         return
     print(f"\n{struct}: {result.variable_type_name}")
-    for name, member in result.members.items():
-        if isinstance(member, CIPArray):
-            element = type(member.local_cip_data_type_object).__name__
-            print(f"  {name}  ARRAY[{dims_str(member)}] OF {element}")
-        else:
-            print(f"  {name}  {type(member).__name__}")
+    members, _ = flatten(result, struct)
+    _print_tree(members, depth=1)
 
 
-def watch_struct(eip, ip, struct, members, interval):
+def _print_tree(members, depth):
+    for member in members:
+        print(f"{'  ' * depth}{member.path}  {member.type_name}")
+        _print_tree(member.children, depth + 1)
+
+
+def _watch_columns(members, wanted, expand_all):
+    """Pick the columns to show from a flattened structure.
+
+    Selecting a nested path (``-m Ilk.Trip``) expands just enough of the tree to
+    reach it; naming a branch itself (``-m Ilk``) leaves it collapsed, so the
+    column holds the compact ``Trip=1 Msg=HiVac`` summary.
+    """
+    expanded = branch_paths(members) if expand_all else set()
+    for path in wanted:
+        expanded |= ancestors(path)
+    columns = columns_for(members, expanded)
+    if expand_all:
+        # Every branch is expanded, so its summary column just repeats the
+        # children beside it. The GUI keeps that column as the click target for
+        # collapsing; a terminal has nothing to click, so drop it.
+        return [column for column in columns if not column.member.branch]
+    return [column for column in columns if column.member.path in wanted]
+
+
+def watch_struct(eip, ip, struct, members, interval, expand_all=False):
     """Poll a structure and redraw a live table of the selected members.
 
     Reads the whole structure in one request sequence per refresh (read-only
@@ -113,55 +155,48 @@ def watch_struct(eip, ip, struct, members, interval):
         if not isinstance(result, CIPStructure):
             print(f"{struct} is a {type(result).__name__}, not a structure")
             return
-        if all(m not in result.members for m in members):
+        # rows index into the value lists; the displayed index is row+start,
+        # since PLC arrays are declared ARRAY[start..N] (commonly 1-based, with
+        # index 0 as padding).
+        tree, start = flatten(result, struct)
+        columns = _watch_columns(tree, members, expand_all)
+        if not columns:
             print(f"none of [{', '.join(members)}] exist in {struct}")
-            print(f"pick some of its members with -m: {', '.join(result.members)}")
+            print("pick some of its members with -m (or use --expand-all):")
+            _print_tree(tree, depth=1)
             return
-        columns = {m: member_values(result, m) for m in members}
-        # rows index into the value lists; displayed index is row+start, since PLC
-        # arrays are declared ARRAY[start..N] (commonly 1-based, index 0 padding).
-        start = next(
-            (
-                m.start_array_elements[0]
-                for m in result.members.values()
-                if isinstance(m, CIPArray)
-            ),
-            0,
-        )
 
         if rows is None:
-            labels = member_values(result, USED_MARKER_MEMBER)
-            if labels:
-                rows = [i for i, v in enumerate(labels) if str(v).strip()]
-            else:  # no marker member: show every index of the first column
-                first = next(v for v in columns.values() if v is not None)
-                rows = list(range(len(first)))
+            marker = find(tree, USED_MARKER_MEMBER)
+            if marker is not None and marker.values:
+                rows = [i for i, v in enumerate(marker.values) if str(v).strip()]
+            else:  # no marker member: show every row the structure has
+                rows = list(range(row_count(tree)))
 
         cells = {}
         widths = {}
-        for member, values in columns.items():
-            widths[member] = len(member)
+        for column in columns:
+            path = column.member.path
+            widths[path] = len(path)
             for idx in rows:
-                if values is None or idx >= len(values):
-                    text = "n/a"
-                else:
-                    text = str(values[idx]).strip()[:MAX_CELL_WIDTH]
-                changed = previous.get((member, idx), text) != text
-                previous[(member, idx)] = text
-                cells[(member, idx)] = (text, changed)
-                widths[member] = max(widths[member], len(text))
+                text = row_text(column.member, idx)[:MAX_CELL_WIDTH]
+                changed = previous.get((path, idx), text) != text
+                previous[(path, idx)] = text
+                cells[(path, idx)] = (text, changed)
+                widths[path] = max(widths[path], len(text))
 
+        paths = [column.member.path for column in columns]
         lines = [
             f"{struct} @ {ip}  {time.strftime('%H:%M:%S')}  "
             f"(every {interval}s, read-only)  Ctrl-C to stop",
             "",
-            "  idx  " + "  ".join(m.ljust(widths[m]) for m in members),
+            "  idx  " + "  ".join(p.ljust(widths[p]) for p in paths),
         ]
         for idx in rows:
             line = f"  {idx + start:>3}  "
-            for member in members:
-                text, changed = cells[(member, idx)]
-                padded = text.ljust(widths[member])
+            for path in paths:
+                text, changed = cells[(path, idx)]
+                padded = text.ljust(widths[path])
                 if changed:
                     padded = f"{CHANGED}{padded}{RESET}"
                 line += padded + "  "
@@ -171,7 +206,15 @@ def watch_struct(eip, ip, struct, members, interval):
         time.sleep(interval)
 
 
-def read_plc(ip, list_tags=False, detail=None, show=None, members=None, interval=2.0):
+def read_plc(
+    ip,
+    list_tags=False,
+    detail=None,
+    show=None,
+    members=None,
+    interval=2.0,
+    expand_all=False,
+):
     """Connect to the PLC at ``ip`` and run one interrogation mode — the core of
     the ``dls-plc-tools read`` subcommand. With no mode selected, summarises every
     published structure (the dictionary walk)."""
@@ -196,7 +239,14 @@ def read_plc(ip, list_tags=False, detail=None, show=None, members=None, interval
 
         if detail:
             watch = members.split(",") if members else WATCH_MEMBERS
-            watch_struct(eip, ip, detail, watch, max(interval, 0.5))
+            watch_struct(
+                eip,
+                ip,
+                detail,
+                [w.strip() for w in watch if w.strip()],
+                max(interval, 0.5),
+                expand_all=expand_all,
+            )
             return
 
         # Default mode: discover structure tags from the dictionary walk,

@@ -11,7 +11,7 @@ import sys
 
 from aphyt import omron
 from aphyt.cip.cip import CIPException
-from aphyt.cip.cip_datatypes import CIPArray, CIPStructure
+from aphyt.cip.cip_datatypes import CIPStructure
 from openpyxl import Workbook
 from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QBrush, QColor
@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from dls_plc_tools.interrogate import INFO_TAGS, USED_MARKER_MEMBER, dims_str
+from dls_plc_tools.interrogate import INFO_TAGS, USED_MARKER_MEMBER
 from dls_plc_tools.portforward import (
     DEFAULT_CLUSTER,
     EIP_PORT,
@@ -44,6 +44,14 @@ from dls_plc_tools.portforward import (
     list_nodes,
     name_for,
     resolve_host,
+)
+from dls_plc_tools.structure import (
+    branch_paths,
+    columns_for,
+    find,
+    flatten,
+    row_count,
+    row_text,
 )
 
 CHANGED_BRUSH = QBrush(QColor("#ffd54f"))  # amber for values that just changed
@@ -54,9 +62,17 @@ def _sheet_name(name):
     return re.sub(r"[\[\]:*?/\\]", "_", name)[:31]
 
 
-def _cell(value):
-    """Coerce a CIP value into something openpyxl can store."""
-    return value if isinstance(value, int | float | str | bool) else str(value)
+def _export_cell(member, row):
+    """The value openpyxl should store for one member/row.
+
+    Native scalars are passed through so numbers stay numeric in the sheet;
+    branches and joined nested arrays fall back to their rendered text.
+    """
+    if not member.branch and member.values is not None and row < len(member.values):
+        value = member.values[row]
+        if isinstance(value, int | float | str | bool):
+            return value
+    return row_text(member, row)
 
 
 def _fit_columns(sheet, pad=2, cap=60):
@@ -87,8 +103,8 @@ class PlcWorker(QObject):
 
     connected = Signal(str)
     tags_ready = Signal(list)
-    # name, {member: values}, {member: type}, array start index (0- or 1-based)
-    struct_ready = Signal(str, object, object, int)
+    # name, flattened Member tree, array start index (0- or 1-based)
+    struct_ready = Signal(str, object, int)
     exported = Signal(str)
     failed = Signal(str)
     progress = Signal(str)  # human-readable phase updates during a slow connect
@@ -210,35 +226,23 @@ class PlcWorker(QObject):
             return
         try:
             result = self._eip.read_variable(name)
-            columns = {}
-            types = {}
-            start = 0  # PLC array index of value list position 0 (structs are 1-based)
-            if isinstance(result, CIPStructure):
-                for member, value in result.members.items():
-                    if isinstance(value, CIPArray):
-                        columns[member] = value.value()
-                        start = value.start_array_elements[0]
-                        element = type(value.local_cip_data_type_object).__name__
-                        types[member] = f"ARRAY[{dims_str(value)}] OF {element}"
-                    else:
-                        columns[member] = [value.value()]
-                        types[member] = type(value).__name__
-            elif isinstance(result, CIPArray):
-                start = result.start_array_elements[0]
-                element = type(result.local_cip_data_type_object).__name__
-                columns[name] = result.value()
-                types[name] = f"ARRAY[{dims_str(result)}] OF {element}"
-            else:  # scalar tag: one-cell table
-                columns[name] = [result]
-                types[name] = type(result).__name__
-            self.struct_ready.emit(name, columns, types, start)
+            # flatten() handles all three shapes a tag can take (structure,
+            # bare array, scalar) and turns any non-primitive member into an
+            # expandable branch rather than an unreadable repr in one cell.
+            members, start = flatten(result, name)
+            self.struct_ready.emit(name, members, start)
         except Exception as e:
             self.failed.emit(f"read {name}: {e}")
 
     @Slot(str)
     def export_structs(self, path):
         """Dump every published structure to an Excel workbook, one sheet per
-        structure: rows are members, columns are instance indices."""
+        structure: rows are members, columns are instance indices.
+
+        Nested members are fully expanded here — a spreadsheet has no expand
+        affordance, and one row per dotted leaf path is what makes the dump
+        diffable against the reference tag spreadsheet.
+        """
         if self._eip is None:
             self.failed.emit("not connected")
             return
@@ -254,22 +258,18 @@ class PlcWorker(QObject):
                 result = self._eip.read_variable(name)
                 if not isinstance(result, CIPStructure):
                     continue
-                rows = {}
-                width = 1
-                start = (
-                    0  # PLC index of column 0 (structs are declared ARRAY[start..N])
-                )
-                for member, value in result.members.items():
-                    if isinstance(value, CIPArray):
-                        rows[member] = value.value()
-                        start = value.start_array_elements[0]
-                    else:
-                        rows[member] = [value.value()]
-                    width = max(width, len(rows[member]))
+                # start is the PLC index of column 0 (ARRAY[start..N]).
+                members, start = flatten(result, name)
+                columns = columns_for(members, branch_paths(members))
+                width = max(row_count(members), 1)
                 sheet = workbook.create_sheet(_sheet_name(name))
                 sheet.append([name] + list(range(start, start + width)))
-                for member, values in rows.items():
-                    sheet.append([member] + [_cell(v) for v in values])
+                for column in columns:
+                    member = column.member
+                    sheet.append(
+                        [member.path]
+                        + [_export_cell(member, row) for row in range(width)]
+                    )
                 sheet.freeze_panes = "B2"
                 _fit_columns(sheet)
             workbook.save(path)
@@ -304,6 +304,12 @@ class MainWindow(QMainWindow):
         self._current_struct = None
         self._previous = {}
         self._cluster = cluster
+        # Last flattened read, cached so expand/collapse and filtering redraw
+        # without another PLC read.
+        self._members = None
+        self._start = 0
+        self._columns = []
+        self._expanded = set()  # branch paths currently shown as their leaves
 
         self._worker = PlcWorker()
         self._thread = QThread(self)
@@ -419,6 +425,14 @@ class MainWindow(QMainWindow):
         self.filter_edit.setPlaceholderText("filter members, e.g. Desc,State")
         self.used_only = QCheckBox(f"in-use rows only ({USED_MARKER_MEMBER})")
         self.used_only.setChecked(True)
+        # Members that are structures rather than CIP primitives show as one
+        # collapsed summary column; click the header (or tick this) to expand
+        # them into a column per nested leaf.
+        self.expand_all = QCheckBox("expand nested")
+        self.expand_all.setToolTip(
+            "Expand every nested structure member into its leaf columns "
+            "(or click an individual ▸ column header)"
+        )
         self.interval = QDoubleSpinBox()
         self.interval.setRange(0.5, 60.0)
         self.interval.setValue(2.0)
@@ -430,6 +444,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.watch_btn)
         controls.addWidget(self.filter_edit)
         controls.addWidget(self.used_only)
+        controls.addWidget(self.expand_all)
         controls.addWidget(QLabel("every"))
         controls.addWidget(self.interval)
         controls.addWidget(self.live)
@@ -464,6 +479,13 @@ class MainWindow(QMainWindow):
         self.struct_edit.returnPressed.connect(self._watch_clicked)
         self.interval.valueChanged.connect(self._interval_changed)
         self.live.toggled.connect(self._live_toggled)
+        # Clicking a nested member's header expands/collapses it; filtering and
+        # the row/expansion toggles redraw from the cached read rather than
+        # waiting for the next poll.
+        self.table.horizontalHeader().sectionClicked.connect(self._header_clicked)
+        self.expand_all.toggled.connect(self._expand_all_toggled)
+        self.filter_edit.textChanged.connect(self._render_struct)
+        self.used_only.toggled.connect(self._render_struct)
 
         # Sync the forward fields' enabled state with the (possibly CLI-set)
         # checkbox; setChecked before wiring doesn't emit toggled.
@@ -567,6 +589,12 @@ class MainWindow(QMainWindow):
             return
         self._current_struct = name
         self._previous = {}
+        # A different tag has different members, so drop the cached tree and
+        # any expansion state rather than carrying stale paths over.
+        self._members = None
+        self._columns = []
+        self._expanded = set()
+        self.expand_all.setChecked(False)
         self.table.setRowCount(0)
         self.table.setColumnCount(0)
         self._poll(force=True)
@@ -621,47 +649,91 @@ class MainWindow(QMainWindow):
             self.tag_list.addItem(item)
         self.statusBar().showMessage(f"{len(rows)} user tags", 5000)
 
-    def _on_struct(self, name, columns, types, start):
+    def _on_struct(self, name, members, start):
         self._waiting = False
         if name != self._current_struct:
+            return
+        # Cached so a header click can re-render the expand/collapse state
+        # immediately, without waiting for (or forcing) another PLC read.
+        self._members = members
+        self._start = start
+        self._render_struct()
+        self.statusBar().showMessage(f"{name}: updated", 1500)
+
+    def _render_struct(self):
+        """Draw the table from the cached member tree and expansion state."""
+        members = self._members
+        if members is None:
             return
 
         wanted = [
             w.strip().lower() for w in self.filter_edit.text().split(",") if w.strip()
         ]
-        members = [
-            m for m in columns if not wanted or any(w in m.lower() for w in wanted)
-        ]
-        labels = columns.get(USED_MARKER_MEMBER)
+        columns = columns_for(members, self._expanded)
+        if wanted:
+            # A collapsed branch matches on any descendant path too, so
+            # filtering for "Trip" still finds it inside a collapsed Ilk.
+            columns = [
+                c
+                for c in columns
+                if any(w in p.lower() for p in c.member.paths() for w in wanted)
+            ]
+
+        marker = find(members, USED_MARKER_MEMBER)
         # positions index into the value lists; the displayed index is start+position
         # (PLC arrays are declared ARRAY[start..N], commonly 1-based).
-        if self.used_only.isChecked() and labels:
-            positions = [p for p, v in enumerate(labels) if str(v).strip()]
+        if self.used_only.isChecked() and marker is not None and marker.values:
+            positions = [p for p, v in enumerate(marker.values) if str(v).strip()]
         else:
-            positions = list(range(max((len(v) for v in columns.values()), default=0)))
+            positions = list(range(row_count(members)))
 
-        self.table.setColumnCount(len(members))
+        self._columns = columns
+        self.table.setColumnCount(len(columns))
         self.table.setRowCount(len(positions))
-        self.table.setHorizontalHeaderLabels(members)
-        for col, member in enumerate(members):
+        self.table.setHorizontalHeaderLabels([c.header for c in columns])
+        for col, column in enumerate(columns):
             header = self.table.horizontalHeaderItem(col)
             if header is not None:
-                header.setToolTip(types.get(member, ""))
-        self.table.setVerticalHeaderLabels([str(start + p) for p in positions])
+                tip = f"{column.member.path}: {column.member.type_name}"
+                if column.toggle:
+                    tip += "  (click to expand/collapse)"
+                header.setToolTip(tip)
+        self.table.setVerticalHeaderLabels([str(self._start + p) for p in positions])
 
         previous = self._previous
         current = {}
-        for col, member in enumerate(members):
-            values = columns[member]
+        for col, column in enumerate(columns):
+            path = column.member.path
             for row, pos in enumerate(positions):
-                text = str(values[pos]).strip() if pos < len(values) else "n/a"
-                current[(member, pos)] = text
+                text = row_text(column.member, pos)
+                current[(path, pos)] = text
                 item = QTableWidgetItem(text)
-                if previous.get((member, pos), text) != text:
+                if previous.get((path, pos), text) != text:
                     item.setBackground(CHANGED_BRUSH)
                 self.table.setItem(row, col, item)
         self._previous = current
-        self.statusBar().showMessage(f"{name}: updated", 1500)
+
+    def _header_clicked(self, index):
+        """Expand or collapse the nested member whose header was clicked."""
+        if not 0 <= index < len(self._columns):
+            return
+        path = self._columns[index].toggle
+        if path is None:  # a plain leaf column: nothing to toggle
+            return
+        if path in self._expanded:
+            # Collapsing the parent must drop its descendants too, or they
+            # reappear still-expanded the next time it is opened.
+            self._expanded = {
+                p for p in self._expanded if p != path and not p.startswith(f"{path}.")
+            }
+        else:
+            self._expanded = self._expanded | {path}
+        self._render_struct()
+
+    def _expand_all_toggled(self, checked):
+        if self._members is not None:
+            self._expanded = branch_paths(self._members) if checked else set()
+            self._render_struct()
 
     # --- shutdown -------------------------------------------------------
 
