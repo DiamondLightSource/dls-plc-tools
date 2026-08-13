@@ -43,7 +43,12 @@ dls-plc-tools read 172.23.x.x -l              # list every published tag and its
 dls-plc-tools read 172.23.x.x -s Seq          # show one structure's members and array bounds
 dls-plc-tools read 172.23.x.x -d Seq          # live-updating table of a structure's values
 dls-plc-tools read 172.23.x.x -d Seq -m Desc,State,Status   # choose which members to watch
+dls-plc-tools read 172.23.x.x -p Temp         # diagnose a structure that fails to decode
 ```
+
+`--probe`/`-p` is for the case where reading one tag fails inside `aphyt`: it
+reports the read chunk by chunk, how the structure's members map onto the bytes
+that came back, and which member is the one that cannot be decoded.
 
 `--detail`/`-d` redraws a table every 2 seconds (floor 0.5 s, set with
 `--interval`), highlighting cells that have changed. Press Ctrl-C to stop. See
@@ -146,3 +151,9 @@ uv run dls-plc-tools read <ip>
 - DLS structures are structure-of-arrays: `Seq.Interfc[1]` is instance 1, with
   index 0 reserved as padding. A non-empty `Desc` entry marks an instance that
   is actually in use.
+- **Values read with 1.0.0b5 or earlier may be wrong.** `aphyt` mis-calculates
+  how many bytes a `BOOL` array occupies for some array lengths, and every
+  member declared after such an array in the same structure was then read from
+  the wrong offset — silently, unless the error grew large enough to run off the
+  end of the data and raise. This release corrects the calculation. If you have
+  spreadsheets or notes taken from an earlier version, re-export them.

@@ -161,6 +161,43 @@ already exercised — its sibling classes have inconsistent APIs.
   `str()`-ing whatever comes back — see the nested-structures section.
 - Unknown structure members raise `KeyError` (client-side resolution), not
   `CIPException` — catch both.
+- A whole-tag read can die inside aphyt with a bare
+  `struct.error: unpack requires a buffer of 2 bytes`, thrown from whichever
+  member it happens to be decoding — the traceback names neither the tag nor
+  the member. `CIPStructure.value()` walks members in declaration order and
+  slices `data[offset:offset + size]`, so the cause is always upstream: either
+  the paged read returned fewer bytes than the controller declared, or the
+  member walk drifted and ran off the end. `read -p/--probe <TAG>` tells the two
+  apart on hardware: it repeats the paged read itself, printing what each chunk
+  asked for versus what came back, then the layout audit, then a per-member
+  decode. A member whose slice is short but decodes anyway is reported `SHORT`
+  rather than `ok` — aphyt builds values out of whatever bytes it had without
+  complaining, so a truncated `ARRAY OF <struct>` is silently wrong rather than
+  raising. `layout.py` reproduces that walk
+  offline (`slots`, `audit`) and both front-ends now catch a failing tag rather
+  than aborting: `read` prints the audit (declared vs received bytes, per-member
+  offsets, the first member past the end) and carries on to the next tag; the
+  GUI export skips the tag, names it in the status line, and still writes every
+  other sheet. aphyt assigns `data` onto the cached dictionary instance *before*
+  decoding, so `connected_cip_dispatcher.variables[name]` is still inspectable
+  after the throw — that is what the audit reads.
+- **aphyt sizes BOOL arrays wrongly, and `aphyt_compat.py` corrects it.**
+  `CIPArray._get_size` computes `n // 8 (+2 if n % 16)`, which matches Omron's
+  whole-word packing (`ceil(n / 16) * 2`) only for 1..7, 16..23, 32..39
+  elements. Confirmed on hardware against `DLS\Temperature_External_Structure`:
+  its `Status` member is `ARRAY[0..28] OF BOOL` — 29 bits, 4 bytes on the
+  controller, sized **5** by aphyt. The odd size then trips aphyt's own
+  even-up-on-type-change padding, so the two members after it slice 2 bytes late
+  and the last runs off the end of a read that was complete (3484 declared, 3484
+  received, 3486 consumed) — the `struct.error` above. `aphyt_compat` monkey-
+  patches `_get_size` (there is no seam: it runs inside
+  `from_items`/`from_instance` during the dictionary walk) and both front-ends
+  import it. With it, Temp's members land on 3484 exactly.
+  **This was silently corrupting values, not just crashing:** any structure with
+  a BOOL array of a bad length had every later member sliced late, and only the
+  ones where the drift reached the end of the buffer ever complained. Values
+  read before this fix are suspect. `layout.bool_array_mismatches` stays as the
+  guard that the correction is still applied.
 - The tag dictionary lives at `connected_cip_dispatcher.user_variables` /
   `.system_variables` / `.variables`; populated fully by
   `update_variable_dictionary()` (slow — walks every tag including the
@@ -292,6 +329,7 @@ uv sync
 uv run dls-plc-tools read <ip>     # discover + summarise all structures
 uv run dls-plc-tools read --help   # -l list, -s show members, -d live watch
 uv run dls-plc-tools read <ip> -d V -e   # live watch, nested members expanded
+uv run dls-plc-tools read <ip> -p Temp   # diagnose a tag aphyt fails to decode
 uv run dls-plc-tools gui <ip>
 uv run tox -p                       # pre-commit, pyright, pytest
 ```

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dls_plc_tools import aphyt_compat  # noqa: F401  (corrects aphyt on import)
 from dls_plc_tools.interrogate import INFO_TAGS, USED_MARKER_MEMBER
 from dls_plc_tools.portforward import (
     DEFAULT_CLUSTER,
@@ -254,8 +255,16 @@ class PlcWorker(QObject):
             default_sheet = workbook.active
             if default_sheet is not None:
                 workbook.remove(default_sheet)
+            skipped = []
             for name in structs:
-                result = self._eip.read_variable(name)
+                try:
+                    result = self._eip.read_variable(name)
+                except Exception as e:
+                    # A tag aphyt cannot decode used to lose the whole export.
+                    # Skip it, note it, and still write every other sheet --
+                    # `dls-plc-tools read` prints the layout audit that says why.
+                    skipped.append(f"{name} ({type(e).__name__})")
+                    continue
                 if not isinstance(result, CIPStructure):
                     continue
                 # start is the PLC index of column 0 (ARRAY[start..N]).
@@ -273,7 +282,10 @@ class PlcWorker(QObject):
                 sheet.freeze_panes = "B2"
                 _fit_columns(sheet)
             workbook.save(path)
-            self.exported.emit(f"exported {len(structs)} structures to {path}")
+            message = f"exported {len(structs) - len(skipped)} structures to {path}"
+            if skipped:
+                message += f" — could not decode: {', '.join(skipped)}"
+            self.exported.emit(message)
         except Exception as e:
             self.failed.emit(f"export: {e}")
 

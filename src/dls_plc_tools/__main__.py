@@ -127,6 +127,16 @@ def read(
             "e.g. -s PID",
         ),
     ] = None,
+    probe: Annotated[
+        str | None,
+        typer.Option(
+            "-p",
+            "--probe",
+            metavar="STRUCT",
+            help="diagnose a structure aphyt fails to decode: chunk-by-chunk "
+            "byte counts, member layout and a per-member decode, e.g. -p Temp",
+        ),
+    ] = None,
     members: Annotated[
         str | None,
         typer.Option(
@@ -159,6 +169,7 @@ def read(
         list_tags=list_tags,
         detail=detail,
         show=show,
+        probe=probe,
         members=members,
         interval=interval,
         expand_all=expand_all,

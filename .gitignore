@@ -69,3 +69,6 @@ lockfiles/
 
 # ruff cache
 .ruff_cache/
+
+# structure dumps exported from the GUI
+*.xlsx

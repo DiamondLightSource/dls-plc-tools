@@ -24,6 +24,7 @@ from aphyt.cip.cip_datatypes import (
     CIPArray,
     CIPBoolean,
     CIPInteger,
+    CIPReal,
     CIPString,
     CIPStructure,
     CIPWord,
@@ -125,4 +126,38 @@ def make_struct(*, instances=3):
         make_status(instances=instances, words=[0x0000, 0x002C, 0x0000][:instances]),
     )
 
+    return root
+
+
+def make_temperature_struct():
+    """``DLS\\Temperature_External_Structure`` as a real PLC declares it.
+
+    Taken from ``dls-plc-tools read <ip> -p Temp`` against a vacuum PLC: 29
+    instances (``ARRAY[0..28]``), two STRING[39] arrays, nine REAL arrays, and
+    the ``Status`` BOOL array that used to strand the read -- 29 bits, which
+    Omron packs into 4 bytes. The controller declares the whole structure 3484
+    bytes, which the member sizes add up to only once BOOL arrays are sized
+    Omron's way, so this doubles as the check on that.
+    """
+    root = CIPStructure()
+    root.variable_type_name = "DLS\\Temperature_External_Structure"
+    root.size = 3484
+    instances = 29
+
+    def array(instance, element_size):
+        member = CIPArray()
+        member.from_instance(instance, element_size, 1, [instances], [0])
+        return member
+
+    root.add_member("Interfc", array(CIPInteger(), 2))
+    root.add_member("Interface_Desc0", array(cip_string(39), 39))
+    root.add_member("Desc", array(cip_string(39), 39))
+    limits = ("HiHiLimit", "HiLimit", "LoLimit", "LoLoLimit")
+    for limit in limits + tuple(f"{limit}_RB" for limit in limits):
+        root.add_member(limit, array(CIPReal(), 4))
+    root.add_member("Value", array(CIPReal(), 4))
+    root.add_member("Status", array(CIPBoolean(), 2))
+    root.add_member("Debounce_Time", array(CIPInteger(), 2))
+    root.add_member("Debounce_Time_RB", array(CIPInteger(), 2))
+    root.data = bytes(root.size)
     return root

@@ -266,3 +266,40 @@ def test_export_expands_nested_members_into_rows(gui, tmp_path):
     # The nested struct-of-arrays spreads down the instance columns.
     assert rows["Status.W"] == ["16#0000", "16#002C", "16#0000"]
     assert not any("CIPStructure" in str(v) for row in rows.values() for v in row)
+
+
+def test_export_skips_a_tag_aphyt_cannot_decode(gui, tmp_path):
+    """One undecodable tag used to lose the whole workbook: aphyt raises a bare
+    struct.error from its own member walk, which aborted the export. The other
+    sheets are still worth having, so it is skipped and named instead."""
+    import struct as _struct
+    from types import SimpleNamespace
+
+    from openpyxl import load_workbook
+
+    from dls_plc_tools.gui import PlcWorker
+    from nested import make_struct
+
+    struct = make_struct()
+
+    def read_variable(name):
+        if name == "Temp":
+            raise _struct.error("unpack requires a buffer of 2 bytes")
+        return struct
+
+    worker = PlcWorker()
+    worker._eip = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
+        update_variable_dictionary=lambda: None,
+        connected_cip_dispatcher=SimpleNamespace(
+            user_variables={"Gauge": struct, "Temp": struct}
+        ),
+        read_variable=read_variable,
+    )
+    reported = []
+    worker.exported.connect(reported.append)
+    path = tmp_path / "structs.xlsx"
+    worker.export_structs(str(path))
+
+    assert load_workbook(path).sheetnames == ["Gauge"]
+    assert "exported 1 structures" in reported[0]
+    assert "could not decode: Temp (error)" in reported[0]

@@ -2,17 +2,20 @@
 Summarise the structure tags published by an Omron NX PLC over EtherNet/IP.
 
 With only an IP address, walks the PLC's tag dictionary and summarises every
-published structure it finds. See --help for tag listing, member detail and
-live value watching.
+published structure it finds. See --help for tag listing, member detail, live
+value watching and diagnosing a tag that fails to decode.
 """
 
+import asyncio
 import time
 from collections import Counter
 
 from aphyt import omron
-from aphyt.cip.cip import CIPException
+from aphyt.cip.cip import CIPCommonFormat, CIPException
 from aphyt.cip.cip_datatypes import CIPArray, CIPStructure
 
+from dls_plc_tools import aphyt_compat  # noqa: F401  (corrects aphyt on import)
+from dls_plc_tools.layout import audit, slots
 from dls_plc_tools.structure import (
     ancestors,
     branch_paths,
@@ -86,6 +89,103 @@ def summarise_struct(name, struct):
             )
         except Exception as e:
             print(f"  (could not decode {USED_MARKER_MEMBER}: {e})")
+
+
+def _report_layout(eip, name):
+    """Print the member layout audit for a tag whose read just failed.
+
+    aphyt assigns the bytes it read onto the cached instance *before* decoding
+    them, and that instance is the one in the dispatcher's dictionary, so the
+    failed read is still inspectable here.
+    """
+    instance = eip.connected_cip_dispatcher.variables.get(name)
+    if not isinstance(instance, CIPStructure):
+        return
+    for line in audit(name, instance):
+        print(f"  {line}")
+
+
+def _paged_read(eip, instance):
+    """Repeat aphyt's own paged read of one tag, counting the bytes per chunk.
+
+    ``_multi_message_variable_read`` advances its offset by the chunk size it
+    asked for rather than by what came back, so a short chunk silently shortens
+    the buffer it then decodes. Reading the same way here, but recording what
+    each request actually returned, is what tells a short read apart from a
+    member walk that drifted. Still read-only explicit messaging: the same
+    service `read_variable` uses, one request in flight.
+    """
+    # The sync wrapper exposes no paged read, so this goes through the async
+    # session it drives -- private, but the only way to see the chunk sizes.
+    session = eip._instance  # noqa: SLF001
+    max_read = session.MAXIMUM_LENGTH - 8
+    chunks = []
+    data = b""
+    offset = 0
+    while offset < instance.size:
+        read_size = min(max_read, instance.size - offset)
+        future = asyncio.run_coroutine_threadsafe(
+            session._simple_data_segment_read(instance, offset, read_size),  # noqa: SLF001
+            session.loop,
+        )
+        common = CIPCommonFormat()
+        common.from_bytes(future.result().reply_data)
+        chunks.append((offset, read_size, len(common.data)))
+        data += common.data
+        offset += max_read
+    return data, chunks
+
+
+def probe_struct(eip, name):
+    """Diagnose a structure aphyt cannot decode, without the failing decode.
+
+    Reads the tag byte-for-byte the way aphyt does, reports what came back,
+    audits the member layout against it, then decodes each member separately so
+    the one that actually fails is named — instead of a bare ``struct.error``
+    from inside the library.
+    """
+    eip.update_variable_dictionary()
+    instance = eip.connected_cip_dispatcher.variables.get(name)
+    if instance is None:
+        print(f"{name}: not published on this PLC")
+        return
+    if not isinstance(instance, CIPStructure):
+        print(f"{name} is a {type(instance).__name__}, not a structure")
+        return
+
+    print(f"\nprobing {name}: {instance.variable_type_name}")
+    data, chunks = _paged_read(eip, instance)
+    print(f"  paged read of {instance.size} declared bytes in {len(chunks)} chunk(s):")
+    for offset, asked, got in chunks:
+        short = "  <-- short chunk" if got != asked else ""
+        print(f"    offset {offset:>6}: asked {asked:>4}, got {got:>4}{short}")
+    print(f"  total returned: {len(data)} bytes")
+
+    instance.data = data
+    for line in audit(name, instance):
+        print(f"  {line}")
+
+    print("  decoding each member on its own:")
+    for slot in slots(instance):
+        if "." in slot.path:  # nested members decode with their parent
+            continue
+        member = instance.members[slot.path]
+        chunk = data[slot.offset : slot.end]
+        member.data = chunk
+        sizes = f"{len(chunk)} of {slot.size} bytes"
+        try:
+            member.value()
+        except Exception as e:
+            outcome = f"FAILED  {sizes}  ({type(e).__name__}: {e})"
+        else:
+            # A short slice that still decodes is worse than one that raises:
+            # aphyt builds values out of whatever bytes it had, with no
+            # complaint, so the member is quietly wrong.
+            if len(chunk) < slot.size:
+                outcome = f"SHORT   {sizes} — decoded from part of it"
+            else:
+                outcome = f"ok      {sizes}"
+        print(f"    {slot.path:<28} {outcome}")
 
 
 def list_all_tags(eip):
@@ -211,6 +311,7 @@ def read_plc(
     list_tags=False,
     detail=None,
     show=None,
+    probe=None,
     members=None,
     interval=2.0,
     expand_all=False,
@@ -230,11 +331,18 @@ def read_plc(
             list_all_tags(eip)
             return
 
+        if probe:
+            probe_struct(eip, probe)
+            return
+
         if show:
             try:
                 show_struct(eip, show)
             except CIPException:
                 print(f"{show}: not published on this PLC")
+            except Exception as e:
+                print(f"{show}: could not decode ({type(e).__name__}: {e})")
+                _report_layout(eip, show)
             return
 
         if detail:
@@ -260,4 +368,12 @@ def read_plc(
         )
         print(f"\n{len(structs)} structure tags: {', '.join(structs)}")
         for name in structs:
-            summarise_struct(name, eip.read_variable(name))
+            try:
+                summarise_struct(name, eip.read_variable(name))
+            except Exception as e:
+                # One tag aphyt cannot decode used to abort the whole walk with
+                # a traceback from inside the library, naming neither the tag
+                # nor the member. Report it against the layout instead and keep
+                # going -- the remaining tags are still worth having.
+                print(f"\n{name}: could not decode ({type(e).__name__}: {e})")
+                _report_layout(eip, name)
