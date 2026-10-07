@@ -351,7 +351,7 @@ uv run tox -p                       # pre-commit, pyright, pytest
   container), so a GUI regression can sit green locally and only fail in CI —
   three `QComboBox.setText` calls had rotted that way. If you touch the GUI,
   actually run those tests: fetch the system libs into a sysroot
-  (`apt-get download --print-uris libgl1 libglx0 libglvnd0 libfontconfig1
+  (`apt-get download --print-uris libgl1 libegl1 libglx0 libglvnd0 libfontconfig1
   libfreetype6 libx11-6 libxcb1 libxau6 libxdmcp6 libbsd0 libmd0 libpng16-16t64
   libbrotlidec1 libbrotlicommon1 libexpat1 libxkbcommon0 libdbus-1-3` → curl →
   `dpkg-deb -x`) and point `LD_LIBRARY_PATH` at it. apt's own download method

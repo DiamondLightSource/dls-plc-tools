@@ -235,6 +235,25 @@ def test_in_use_filter_uses_the_marker_member(gui):
     assert win.table.rowCount() == 3
 
 
+def test_in_use_filter_always_keeps_index_zero(gui):
+    """ether_ip assumes base-0 arrays, so index 0 is shown whenever it exists,
+    even though Desc[0] is padding and blank."""
+    from dls_plc_tools.structure import Member
+
+    members = [
+        Member(path="Desc", type_name="STRING", values=["", "pump1", "", "valve3"]),
+        Member(path="State", type_name="INT", values=[0, 4, 0, 7]),
+    ]
+    win = gui.win
+    win._current_struct = "Temp"
+    win._on_struct("Temp", members, 0)
+    assert win.used_only.isChecked()
+    labels = [
+        win.table.verticalHeaderItem(r).text() for r in range(win.table.rowCount())
+    ]
+    assert labels == ["0", "1", "3"]
+
+
 def test_export_expands_nested_members_into_rows(gui, tmp_path):
     """The workbook has no expand affordance, so every nested leaf gets a row —
     and no cell holds aphyt's CIPStructure repr."""

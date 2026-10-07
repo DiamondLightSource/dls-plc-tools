@@ -695,7 +695,14 @@ class MainWindow(QMainWindow):
         # positions index into the value lists; the displayed index is start+position
         # (PLC arrays are declared ARRAY[start..N], commonly 1-based).
         if self.used_only.isChecked() and marker is not None and marker.values:
-            positions = [p for p, v in enumerate(marker.values) if str(v).strip()]
+            # Index 0 is always kept when the array has one: ether_ip assumes
+            # base-0 arrays, so whether it exists matters even though Desc[0]
+            # is padding and therefore always blank.
+            positions = [
+                p
+                for p, v in enumerate(marker.values)
+                if str(v).strip() or self._start + p == 0
+            ]
         else:
             positions = list(range(row_count(members)))
 

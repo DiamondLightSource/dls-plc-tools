@@ -269,7 +269,13 @@ def watch_struct(eip, ip, struct, members, interval, expand_all=False):
         if rows is None:
             marker = find(tree, USED_MARKER_MEMBER)
             if marker is not None and marker.values:
-                rows = [i for i, v in enumerate(marker.values) if str(v).strip()]
+                # Always keep index 0 when it exists: ether_ip assumes base-0
+                # arrays, even though Desc[0] is padding and so always blank.
+                rows = [
+                    i
+                    for i, v in enumerate(marker.values)
+                    if str(v).strip() or start + i == 0
+                ]
             else:  # no marker member: show every row the structure has
                 rows = list(range(row_count(tree)))
 
