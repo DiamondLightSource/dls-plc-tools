@@ -16,7 +16,7 @@ description = "A collection of tools to facilitate EPICS commissioning of PLC ba
 # PySide6-Essentials: the GUI only uses QtCore/QtGui/QtWidgets, so we skip the
 # ~270 MB of Addons (QtWebEngine, Qt3D, Charts, ...) the full PySide6 pulls in.
 # <6.10: last series with manylinux_2_28 wheels (RHEL 8 workstations)
-dependencies = ["aphyt", "PySide6-Essentials<6.10", "openpyxl", "typer"]
+dependencies = ["aphyt", "PySide6-Essentials<6.13", "openpyxl", "typer"]
 dynamic = ["version"]
 license.file = "LICENSE"
 readme = "README.md"
