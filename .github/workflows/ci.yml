@@ -38,7 +38,13 @@ jobs:
 
   dist:
     uses: ./.github/workflows/_dist.yml
-  
+
+  windows-exe:
+    # Freeze a standalone Windows .exe so IT-locked boxes without uv/pip can run
+    # the tool. Runs on every push/PR to catch freeze breakage early; the built
+    # exe is attached to the GitHub release on tags (see release job below).
+    uses: ./.github/workflows/_windows-exe.yml
+
   pypi:
     needs: [dist, test]
     if: github.ref_type == 'tag'
@@ -47,7 +53,7 @@ jobs:
       id-token: write
   
   release:
-    needs: [dist, test]
+    needs: [dist, test, windows-exe]
     if: github.ref_type == 'tag'
     uses: ./.github/workflows/_release.yml
     permissions:
