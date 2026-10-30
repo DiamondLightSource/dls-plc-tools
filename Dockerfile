@@ -23,7 +23,6 @@ ENV UV_PYTHON_INSTALL_DIR=/python
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable --no-dev --managed-python
 
-
 # The runtime stage copies the built venv into a runtime container
 FROM ubuntu:resolute AS runtime
 

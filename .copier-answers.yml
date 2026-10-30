@@ -1,5 +1,5 @@
 # Changes here will be overwritten by Copier
-_commit: 5.2.0
+_commit: 5.5.0
 _src_path: https://github.com/DiamondLightSource/python-copier-template.git
 author_email: lee.hudson@diamond.ac.uk
 author_name: Lee Hudson
@@ -10,7 +10,6 @@ description: A collection of tools to facilitate EPICS commissioning of PLC base
     systems
 distribution_name: dls-plc-tools
 docker: true
-docker_debug: false
 docs_type: README
 git_platform: github.com
 github_org: DiamondLightSource
