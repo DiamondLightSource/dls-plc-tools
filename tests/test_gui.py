@@ -338,3 +338,88 @@ def test_filter_wildcards_match_substrings(gui):
     assert _headers(win) == ["▸ Ilk"]
     win.filter_edit.setText("*.W")
     assert _headers(win) == ["▸ Ilk", "▸ Status"]
+
+
+def test_plc_led_states(gui):
+    win = gui.win
+    assert win.plc_status_label.text() == "not connected"
+    assert not win._heartbeat_timer.isActive()
+    styles = {}
+    for state in ("pending", "good", "lost", "inactive"):
+        win._set_plc_status(state)
+        styles[state] = win.plc_led.styleSheet()
+    assert styles["pending"] != styles["good"] != styles["lost"]
+    assert win.plc_status_label.text() == "not connected"
+
+
+def test_plc_led_heartbeat_runs_only_while_connected(gui):
+    win = gui.win
+    win._set_plc_status("good")
+    assert win._heartbeat_timer.isActive()
+    win._set_plc_status("lost")  # keep checking, so it can recover
+    assert win._heartbeat_timer.isActive()
+    win._set_plc_status("inactive")
+    assert not win._heartbeat_timer.isActive()
+
+
+def test_heartbeat_skipped_while_a_live_watch_is_reading(gui):
+    win = gui.win
+    win.request_heartbeat.disconnect()
+    sent = []
+    win.request_heartbeat.connect(lambda: sent.append(1))
+    win._heartbeat()
+    assert sent == [1]
+    win._heartbeat()  # previous one still in flight
+    assert sent == [1]
+    win._on_heartbeat_done()
+    win._current_struct = "Seq"
+    win.live.setChecked(True)
+    win._heartbeat()  # the watch's own reads drive the LED
+    assert sent == [1]
+
+
+def _worker_with(read_variable):
+    from dls_plc_tools.gui import PlcWorker
+
+    worker = PlcWorker()
+    worker._eip = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
+        read_variable=read_variable, close_explicit=lambda: None
+    )
+    states: list = []
+    worker.plc_status.connect(states.append)
+    return worker, states
+
+
+def test_worker_network_failure_marks_plc_lost(gui):
+    def read_variable(name):
+        raise TimeoutError("timed out")
+
+    worker, states = _worker_with(read_variable)
+    worker._heartbeat_tag = "PLC_Name"
+    worker.heartbeat()
+    worker.read_struct("Seq")
+    assert states == ["lost", "lost"]
+
+
+def test_worker_plc_side_error_keeps_plc_good(gui):
+    # An unknown tag is the PLC answering "no", not the PLC being gone.
+    def read_variable(name):
+        raise KeyError(name)
+
+    worker, states = _worker_with(read_variable)
+    worker.read_struct("Nope")
+    assert states == ["good"]
+
+
+def test_worker_heartbeat_reads_the_info_tag(gui):
+    read = []
+    worker, states = _worker_with(lambda name: read.append(name) or "FE09I")
+    done = []
+    worker.heartbeat_done.connect(lambda: done.append(1))
+    worker.heartbeat()  # no info tag yet: nothing sent, still reports done
+    assert (read, done) == ([], [1])
+    worker._heartbeat_tag = "PLC_Name"
+    worker.heartbeat()
+    assert read == ["PLC_Name"] and states == ["good"]
+    worker.disconnect_plc()
+    assert states[-1] == "inactive" and worker._heartbeat_tag is None

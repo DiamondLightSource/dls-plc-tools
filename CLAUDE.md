@@ -44,6 +44,14 @@ worker's `forward_status(state, name)` signal — `pending` (orange) emitted bef
 `disconnect_plc` (which the failure path also routes through, so a failed
 stand-up goes red). It shows the pod/service name (`name_for(port)` =
 `pfwd-<user>-<port>`) while active so the pod is traceable, cleared on inactive.
+A separate **PLC LED** (`PLC:`, `plc_status` signal) says whether an
+EtherNet/IP session is actually answering, direct or forwarded: `pending` on
+connect, `good` once `register_session` succeeds (a socat pod with no PLC
+behind it cannot answer that), `inactive` on disconnect, and `lost` when a
+request fails at the network level (`OSError`/`EOFError` -- a CIP or decode
+error came *from* the PLC, so it stays `good`). While connected and no live
+watch is reading, a 5 s heartbeat re-reads the first `INFO_TAGS` entry that
+read at connect, with its own in-flight flag; with no info tags it never sends.
 The forward nodes are tainted
 `location=<cell>` (observed `NoSchedule`, which `nodeName` already bypasses, so
 the pod runs regardless); the pod still tolerates any `location` taint

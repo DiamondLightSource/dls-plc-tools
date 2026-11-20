@@ -100,6 +100,19 @@ def _cell_combo(placeholder, items, width):
     return combo
 
 
+# Idle heartbeat for the PLC LED: one small read every 5 s, well inside the
+# "~2 s poll, one request in flight" budget for production PLCs.
+HEARTBEAT_MS = 5000
+
+# PLC LED state -> (colour, label)
+PLC_STATES = {
+    "inactive": ("#c0392b", "not connected"),  # red
+    "pending": ("#e67e22", "connecting"),  # orange
+    "good": ("#27ae60", "connected"),  # green
+    "lost": ("#c0392b", "no reply"),  # red
+}
+
+
 class PlcWorker(QObject):
     """Owns the aphyt connection; lives in a QThread so reads never block the UI."""
 
@@ -113,11 +126,27 @@ class PlcWorker(QObject):
     nodes_ready = Signal(list)  # live cluster node names for the Node dropdown
     # pod-status LED: (state inactive/pending/good, pod name — "" when inactive)
     forward_status = Signal(str, str)
+    # PLC-session LED: inactive / pending / good / lost (see _plc_result)
+    plc_status = Signal(str)
+    heartbeat_done = Signal()  # a heartbeat read finished, either way
 
     def __init__(self):
         super().__init__()
         self._eip = None
         self._pfwd = None  # active PortForward, if we connected through one
+        # An info tag that read back at connect, re-read as the idle heartbeat.
+        # None when the PLC publishes none of them: the LED then only follows
+        # the reads the operator makes.
+        self._heartbeat_tag = None
+
+    def _plc_result(self, error=None):
+        """Drive the PLC LED from the outcome of a request. A network-level
+        failure (socket error, timeout, connection dropped) means nothing
+        answered: ``lost``. Anything else -- a CIP error for an unknown tag, a
+        member aphyt cannot decode -- came back *from* the PLC, so it is still
+        there: ``good``."""
+        lost = isinstance(error, OSError | EOFError)
+        self.plc_status.emit("lost" if lost else "good")
 
     def _open_session(self, host, port):
         """Open a read-only explicit-messaging session to host:port and emit the
@@ -134,15 +163,22 @@ class PlcWorker(QObject):
             try:
                 info.append(f"{tag}={eip.read_variable(tag)}")
             except CIPException:
-                pass
+                continue
+            if self._heartbeat_tag is None:
+                self._heartbeat_tag = tag
+        # register_session needs an EtherNet/IP reply, which a bare TCP listener
+        # (e.g. a socat pod whose PLC is unreachable) cannot give.
+        self.plc_status.emit("good")
         self.connected.emit("   ".join(info))
 
     @Slot(str)
     def connect_plc(self, ip):
         try:
             self.disconnect_plc()
+            self.plc_status.emit("pending")
             self._open_session(ip, EIP_PORT)
         except Exception as e:
+            self.disconnect_plc()  # resets the PLC LED to inactive
             self.failed.emit(f"connect: {e}")
 
     @Slot(str)
@@ -166,6 +202,7 @@ class PlcWorker(QObject):
             # name_for(port) is exactly the name up() gives the pod/service, so
             # show it now (during stand-up) to make the running pod traceable.
             self.forward_status.emit("pending", name_for(port))
+            self.plc_status.emit("pending")
             self.progress.emit(f"resolving {service_ip}...")
             service_ip = resolve_host(service_ip)
             # Register the forward *before* standing it up: up() creates the
@@ -191,6 +228,8 @@ class PlcWorker(QObject):
             except Exception:
                 pass
             self._eip = None
+        self._heartbeat_tag = None
+        self.plc_status.emit("inactive")
         if self._pfwd is not None:
             self.progress.emit("removing port forward...")
             try:
@@ -210,6 +249,7 @@ class PlcWorker(QObject):
             return
         try:
             self._eip.update_variable_dictionary()
+            self._plc_result()
             user = self._eip.connected_cip_dispatcher.user_variables
             rows = []
             for name, dtype in sorted(user.items()):
@@ -219,6 +259,7 @@ class PlcWorker(QObject):
                     rows.append((name, type(dtype).__name__))
             self.tags_ready.emit(rows)
         except Exception as e:
+            self._plc_result(e)
             self.failed.emit(f"list tags: {e}")
 
     @Slot(str)
@@ -228,12 +269,14 @@ class PlcWorker(QObject):
             return
         try:
             result = self._eip.read_variable(name)
+            self._plc_result()
             # flatten() handles all three shapes a tag can take (structure,
             # bare array, scalar) and turns any non-primitive member into an
             # expandable branch rather than an unreadable repr in one cell.
             members, start = flatten(result, name)
             self.struct_ready.emit(name, members, start)
         except Exception as e:
+            self._plc_result(e)
             self.failed.emit(f"read {name}: {e}")
 
     @Slot(str)
@@ -288,7 +331,25 @@ class PlcWorker(QObject):
                 message += f" — could not decode: {', '.join(skipped)}"
             self.exported.emit(message)
         except Exception as e:
+            self._plc_result(e)
             self.failed.emit(f"export: {e}")
+
+    @Slot()
+    def heartbeat(self):
+        """Re-read the connect-time info tag so the PLC LED notices a PLC that
+        has gone away while nothing else is being read. One small explicit
+        read, through the same path every other read uses."""
+        try:
+            if self._eip is None or self._heartbeat_tag is None:
+                return
+            try:
+                self._eip.read_variable(self._heartbeat_tag)
+            except Exception as e:
+                self._plc_result(e)
+            else:
+                self._plc_result()
+        finally:
+            self.heartbeat_done.emit()
 
 
 class MainWindow(QMainWindow):
@@ -300,6 +361,7 @@ class MainWindow(QMainWindow):
     request_struct = Signal(str)
     request_export = Signal(str)
     request_disconnect = Signal()
+    request_heartbeat = Signal()
 
     def __init__(
         self,
@@ -314,6 +376,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DLS PLC tools")
         self.resize(1100, 650)
         self._waiting = False
+        self._heartbeat_waiting = False
         self._current_struct = None
         self._previous = {}
         self._cluster = cluster
@@ -334,6 +397,7 @@ class MainWindow(QMainWindow):
         self.request_struct.connect(self._worker.read_struct)
         self.request_export.connect(self._worker.export_structs)
         self.request_disconnect.connect(self._worker.disconnect_plc)
+        self.request_heartbeat.connect(self._worker.heartbeat)
         self._worker.connected.connect(self._on_connected)
         self._worker.tags_ready.connect(self._on_tags)
         self._worker.struct_ready.connect(self._on_struct)
@@ -342,10 +406,17 @@ class MainWindow(QMainWindow):
         self._worker.failed.connect(self._on_failed)
         self._worker.nodes_ready.connect(self._on_nodes_ready)
         self._worker.forward_status.connect(self._set_pod_status)
+        self._worker.plc_status.connect(self._set_plc_status)
+        self._worker.heartbeat_done.connect(self._on_heartbeat_done)
         self._thread.start()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
+        # Idle liveness check for the PLC LED; skipped while a live watch is
+        # already reading (that read drives the LED) or any request is in flight.
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(HEARTBEAT_MS)
+        self._heartbeat_timer.timeout.connect(self._heartbeat)
 
         # Top bar: connection. Fields prefill from the command line (see main).
         self.ip_edit = QLineEdit(ip or "")
@@ -400,6 +471,13 @@ class MainWindow(QMainWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse  # so the name can be copied
         )
         self._set_pod_status("inactive", "")
+        # PLC LED: is an EtherNet/IP session actually answering, directly or
+        # through the forward. Separate from the pod LED, which only says the
+        # forward exists.
+        self.plc_led = QLabel()
+        self.plc_led.setFixedSize(14, 14)
+        self.plc_status_label = QLabel()
+        self._set_plc_status("inactive")
         self.info_label = QLabel("not connected")
         top = QHBoxLayout()
         top.addWidget(QLabel("IP address:"))
@@ -413,6 +491,9 @@ class MainWindow(QMainWindow):
         top.addWidget(self.port_spin)
         top.addWidget(self.connect_btn)
         top.addWidget(self.disconnect_btn)
+        top.addWidget(QLabel("PLC:"))
+        top.addWidget(self.plc_led)
+        top.addWidget(self.plc_status_label)
         top.addWidget(QLabel("Pod:"))
         top.addWidget(self.pod_led)
         top.addWidget(self.pod_status_label)
@@ -549,6 +630,34 @@ class MainWindow(QMainWindow):
         self.pod_status_label.setText(state)
         self.pod_name_label.setText(name)
 
+    def _set_plc_status(self, state):
+        """Colour the PLC LED: ``inactive`` (red -- no session), ``pending``
+        (orange -- connecting), ``good`` (green -- the PLC answered the last
+        request), ``lost`` (red -- it stopped answering)."""
+        colour, text = PLC_STATES.get(state, PLC_STATES["inactive"])
+        self.plc_led.setStyleSheet(f"background-color: {colour}; border-radius: 7px;")
+        self.plc_status_label.setText(text)
+        self.plc_led.setToolTip(text)
+        if state == "good":
+            self._heartbeat_timer.start()
+        elif state == "inactive":
+            self._heartbeat_timer.stop()
+
+    def _heartbeat(self):
+        # Its own in-flight flag, so a heartbeat never makes a Watch click skip
+        # its read; the worker thread serialises the two on the wire anyway.
+        if (
+            self._heartbeat_waiting
+            or self._waiting
+            or (self._current_struct and self.live.isChecked())
+        ):
+            return
+        self._heartbeat_waiting = True
+        self.request_heartbeat.emit()
+
+    def _on_heartbeat_done(self):
+        self._heartbeat_waiting = False
+
     def _connect_clicked(self):
         ip = self.ip_edit.text().strip()
         if not ip:
@@ -574,6 +683,7 @@ class MainWindow(QMainWindow):
     def _disconnect_clicked(self):
         # Stop polling first so no read is queued against the closing session.
         self._timer.stop()
+        self._heartbeat_timer.stop()
         self._waiting = False
         self.request_disconnect.emit()
         self.disconnect_btn.setEnabled(False)
@@ -768,6 +878,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):  # noqa: N802 - Qt override
         self._timer.stop()
+        self._heartbeat_timer.stop()
         # Tear the forward down *synchronously* before quitting the thread. A
         # queued emit races thread shutdown, and the kubectl deletes (which wait
         # out the pod's termination grace) outlast a short wait(), so the process
