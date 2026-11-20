@@ -15,7 +15,7 @@ from aphyt.cip.cip import CIPException
 from aphyt.cip.cip_datatypes import CIPStructure
 from openpyxl import Workbook
 from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QIntValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -529,6 +529,13 @@ class MainWindow(QMainWindow):
             "Expand every nested structure member into its leaf columns "
             "(or click an individual ▸ column header)"
         )
+        # Optional single instance: blank shows every row, a number shows just
+        # that PLC index (whether or not it is in use).
+        self.index_edit = QLineEdit()
+        self.index_edit.setPlaceholderText("index")
+        self.index_edit.setToolTip("Show only this array index (blank for all rows)")
+        self.index_edit.setValidator(QIntValidator(0, 1_000_000, self.index_edit))
+        self.index_edit.setFixedWidth(60)
         self.interval = QDoubleSpinBox()
         self.interval.setRange(0.5, 60.0)
         self.interval.setValue(2.0)
@@ -539,6 +546,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.struct_edit)
         controls.addWidget(self.watch_btn)
         controls.addWidget(self.filter_edit)
+        controls.addWidget(self.index_edit)
         controls.addWidget(self.used_only)
         controls.addWidget(self.expand_all)
         controls.addWidget(QLabel("every"))
@@ -546,6 +554,10 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.live)
         self.table = QTableWidget()
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # Cells are sized to their contents on every redraw (_render_struct), so
+        # a long string widens its column instead of wrapping into a row too
+        # short to show it.
+        self.table.setWordWrap(False)
         right_box = QVBoxLayout()
         right_box.addLayout(controls)
         right_box.addWidget(self.table)
@@ -582,6 +594,7 @@ class MainWindow(QMainWindow):
         self.expand_all.toggled.connect(self._expand_all_toggled)
         self.filter_edit.textChanged.connect(self._render_struct)
         self.used_only.toggled.connect(self._render_struct)
+        self.index_edit.textChanged.connect(self._render_struct)
 
         # Sync the forward fields' enabled state with the (possibly CLI-set)
         # checkbox; setChecked before wiring doesn't emit toggled.
@@ -814,7 +827,13 @@ class MainWindow(QMainWindow):
         marker = find(members, USED_MARKER_MEMBER)
         # positions index into the value lists; the displayed index is start+position
         # (PLC arrays are declared ARRAY[start..N], commonly 1-based).
-        if self.used_only.isChecked() and marker is not None and marker.values:
+        index = self.index_edit.text().strip()
+        if index:
+            # One explicit index wins over the in-use filter: asking for it by
+            # number means wanting to see it even if Desc is blank.
+            pos = int(index) - self._start
+            positions = [pos] if 0 <= pos < row_count(members) else []
+        elif self.used_only.isChecked() and marker is not None and marker.values:
             # Index 0 is always kept when the array has one: ether_ip assumes
             # base-0 arrays, so whether it exists matters even though Desc[0]
             # is padding and therefore always blank.
@@ -851,6 +870,8 @@ class MainWindow(QMainWindow):
                     item.setBackground(CHANGED_BRUSH)
                 self.table.setItem(row, col, item)
         self._previous = current
+        self.table.resizeColumnsToContents()
+        self.table.resizeRowsToContents()
 
     def _header_clicked(self, index):
         """Expand or collapse the nested member whose header was clicked."""

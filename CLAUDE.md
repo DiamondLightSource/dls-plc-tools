@@ -265,7 +265,10 @@ toggle redraw without another PLC read, and expansion survives a poll but is
 dropped when a different tag is watched. The filter terms are exact,
 case-insensitive dotted paths unless they contain shell wildcards (`fnmatch`):
 `Desc` is only `Desc`, `*Desc*` is every path containing it. It matches
-descendant paths, so `Ilk.Trip` (or `*Trip`) still surfaces a collapsed `Ilk`. CLI: `-m` takes dotted paths
+descendant paths, so `Ilk.Trip` (or `*Trip`) still surfaces a collapsed `Ilk`. The
+**index** box shows one PLC index (blank = all) and overrides the in-use filter,
+so an unused index can still be inspected. The table never wraps:
+columns/rows are resized to their contents on every redraw. CLI: `-m` takes dotted paths
 and expands just enough to reach them (`-m Desc,IMG.W`); naming a branch leaves
 it collapsed; `-e/--expand-all` shows every leaf and drops the now-redundant
 branch columns. `-s/--show` prints the tree, and the paths it prints are exactly

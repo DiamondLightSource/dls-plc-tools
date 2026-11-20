@@ -423,3 +423,40 @@ def test_worker_heartbeat_reads_the_info_tag(gui):
     assert read == ["PLC_Name"] and states == ["good"]
     worker.disconnect_plc()
     assert states[-1] == "inactive" and worker._heartbeat_tag is None
+
+
+def _rows(win):
+    return [win.table.verticalHeaderItem(r).text() for r in range(win.table.rowCount())]
+
+
+def test_index_box_shows_a_single_row(gui):
+    win = _watch_nested(gui.win)
+    assert _rows(win) == ["1", "2"]  # instance 3 is unused, so hidden
+    win.index_edit.setText("2")
+    assert _rows(win) == ["2"]
+    assert win.table.item(0, _column(win, "Desc")).text() == "valve2"
+    win.index_edit.setText("")
+    assert _rows(win) == ["1", "2"]
+
+
+def test_index_box_shows_an_unused_index_when_asked(gui):
+    win = _watch_nested(gui.win)
+    win.index_edit.setText("3")  # in-use filter is on, but it was asked for
+    assert _rows(win) == ["3"]
+
+
+def test_index_box_out_of_range_shows_nothing(gui):
+    win = _watch_nested(gui.win)
+    win.index_edit.setText("99")
+    assert _rows(win) == []
+
+
+def test_columns_always_fit_their_contents(gui):
+    win = _watch_nested(gui.win)
+    win.expand_all.setChecked(True)
+    default = win.table.horizontalHeader().defaultSectionSize()
+    col = _column(win, "Ilk.IMG.B")  # bit string, wider than a default column
+    assert not win.table.wordWrap()
+    assert win.table.columnWidth(col) > default
+    _watch_nested(win)  # still fitted after the next poll redraws
+    assert win.table.columnWidth(col) > default
