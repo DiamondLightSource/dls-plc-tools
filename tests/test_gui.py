@@ -204,7 +204,7 @@ def test_expand_nested_checkbox_expands_every_branch(gui):
 
 def test_filter_matches_members_inside_a_collapsed_branch(gui):
     win = _watch_nested(gui.win)
-    win.filter_edit.setText("Trip")
+    win.filter_edit.setText("Ilk.Trip")
     # Ilk stays collapsed but is still surfaced, so the filter does not appear
     # to lose a member that exists.
     assert _headers(win) == ["▸ Ilk"]
@@ -322,3 +322,19 @@ def test_export_skips_a_tag_aphyt_cannot_decode(gui, tmp_path):
     assert load_workbook(path).sheetnames == ["Gauge"]
     assert "exported 1 structures" in reported[0]
     assert "could not decode: Temp (error)" in reported[0]
+
+
+def test_filter_term_without_wildcards_matches_the_whole_path_only(gui):
+    win = _watch_nested(gui.win)
+    win._header_clicked(_column(win, "▸ Status"))
+    # "W" must not pick up Status.W, nor "Desc" any other path containing it.
+    win.filter_edit.setText("desc,W")
+    assert _headers(win) == ["Desc"]
+
+
+def test_filter_wildcards_match_substrings(gui):
+    win = _watch_nested(gui.win)
+    win.filter_edit.setText("*Trip*")
+    assert _headers(win) == ["▸ Ilk"]
+    win.filter_edit.setText("*.W")
+    assert _headers(win) == ["▸ Ilk", "▸ Status"]

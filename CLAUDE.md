@@ -254,8 +254,10 @@ header expands it into `Ilk.Trip`/`Ilk.Msg` and the header becomes `▾ Ilk`. Th
 branch column is kept when expanded because it *is* the collapse affordance.
 The last read is cached (`_members`), so expanding, filtering and the in-use
 toggle redraw without another PLC read, and expansion survives a poll but is
-dropped when a different tag is watched. The filter matches descendant paths, so
-filtering `Trip` still surfaces a collapsed `Ilk`. CLI: `-m` takes dotted paths
+dropped when a different tag is watched. The filter terms are exact,
+case-insensitive dotted paths unless they contain shell wildcards (`fnmatch`):
+`Desc` is only `Desc`, `*Desc*` is every path containing it. It matches
+descendant paths, so `Ilk.Trip` (or `*Trip`) still surfaces a collapsed `Ilk`. CLI: `-m` takes dotted paths
 and expands just enough to reach them (`-m Desc,IMG.W`); naming a branch leaves
 it collapsed; `-e/--expand-all` shows every leaf and drops the now-redundant
 branch columns. `-s/--show` prints the tree, and the paths it prints are exactly

@@ -6,6 +6,7 @@ mechanism the EPICS ether_ip driver uses.
 Usage: dls-plc-tools gui [ip-address]
 """
 
+import fnmatch
 import re
 import sys
 
@@ -434,7 +435,9 @@ class MainWindow(QMainWindow):
         self.struct_edit.setPlaceholderText("tag to watch, e.g. Seq or PLC_Status")
         self.watch_btn = QPushButton("Watch")
         self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText("filter members, e.g. Desc,State")
+        self.filter_edit.setPlaceholderText(
+            "filter members: exact paths, e.g. Desc,Ilk.Trip, or *Desc* for any"
+        )
         self.used_only = QCheckBox(f"in-use rows only ({USED_MARKER_MEMBER})")
         self.used_only.setChecked(True)
         # Members that are structures rather than CIP primitives show as one
@@ -683,12 +686,19 @@ class MainWindow(QMainWindow):
         ]
         columns = columns_for(members, self._expanded)
         if wanted:
-            # A collapsed branch matches on any descendant path too, so
-            # filtering for "Trip" still finds it inside a collapsed Ilk.
+            # Each term matches a whole dotted path (case-insensitive), with
+            # shell wildcards for anything looser: "Desc" is just Desc, "*Desc*"
+            # is every path containing it. A collapsed branch matches on any
+            # descendant path too, so "Ilk.Trip" still finds it inside a
+            # collapsed Ilk.
             columns = [
                 c
                 for c in columns
-                if any(w in p.lower() for p in c.member.paths() for w in wanted)
+                if any(
+                    fnmatch.fnmatchcase(p.lower(), w)
+                    for p in c.member.paths()
+                    for w in wanted
+                )
             ]
 
         marker = find(members, USED_MARKER_MEMBER)
