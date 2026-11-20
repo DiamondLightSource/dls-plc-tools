@@ -33,7 +33,7 @@ jobs:
         # PySide6-Essentials<6.10 (pinned for RHEL 8 glibc) declares
         # Requires-Python <3.14, which pip enforces (uv does not), so pip on the
         # runner default 3.14 cannot install the wheel. Drop with the pin.
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
