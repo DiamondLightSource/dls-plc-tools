@@ -35,7 +35,7 @@ jobs:
         # runner default 3.14 cannot install the wheel. Drop with the pin.
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: "3.15"
 
       - name: Install produced wheel
         run: python -m pip install dist/*.whl
